@@ -34,7 +34,7 @@
 #define RX_NCO_FORBID_LO    0u  
 #define RX_NCO_FORBID_HI    5000u  
 #define RX_NCO_MAX_HZ       62500u  
-#define RX_CLK_SYS_MIN_HZ   320000000ULL
+#define RX_CLK_SYS_MIN_HZ   240000000ULL
 #define VFO_CLK_SYS_NOMINAL 133000000ULL  
   
 // ---- PIO-программа квадратуры: 4 такта на период, 2 соседних пина ------  
@@ -90,11 +90,23 @@ static void quad_start(uint32_t freq_hz) {
   // джиттер → спуры. На фиксированных 133 МГц целый D слишком крупный на ВЧ  
   // (на 14 МГц ближайший D=2 => 16.625 МГц, промах > окна NCO ±62.5 кГц).  
   // Ищем достижимую PLL-комбинацию, пересчитываем делитель от реальной шины.  
-  const uint64_t xosc_hz = vfo_xosc_hz();  
-  const uint64_t clk_max = (vfo_max_clk_sys_hz < 420000000ULL)  
-                           ? vfo_max_clk_sys_hz : 420000000ULL;  
+
+const uint64_t xosc_hz = vfo_xosc_hz();  
+  // Эффективный потолок скана = min(flash-паспорт, аппаратный барьер).  
+  // Если паспорт не доказан (OCTEST не запускался — остался 133 МГц),  
+  // окно [MIN, max] пустое → берём прошитый OCTEST-потолок pll_ceiling,  
+  // как делает приёмник (380 МГц, VREG_1_30 — доказанная точка).  
+  uint64_t clk_max = (vfo_max_clk_sys_hz < 420000000ULL)  
+                     ? vfo_max_clk_sys_hz : 420000000ULL;  
+  if (clk_max < RX_CLK_SYS_MIN_HZ) {  
+    clk_max = pll_ceiling.clk_sys_hz;  
+    Serial.printf("[QUAD] паспорт clk_max=%lu МГц не доказан — "  
+                  "потолок из pll_ceiling=%lu МГц\n",  
+                  (unsigned long)(vfo_max_clk_sys_hz / 1000000UL),  
+                  (unsigned long)(clk_max / 1000000ULL));  
+  }  
   const uint64_t vco_max = (vfo_max_pll_vco_hz < 4300000000ULL)  
-                           ? vfo_max_pll_vco_hz : 4300000000ULL;  
+                           ? vfo_max_pll_vco_hz : 4300000000ULL;
   
   // Веса лексикографики: W2 >> W3 >> W4 >> W5 (старший критерий доминирует).  
   const uint64_t W2 = 1000000000ull;  // П2: удаление от сладкой зоны (за 1 Гц)  
@@ -197,14 +209,23 @@ static void quad_start(uint32_t freq_hz) {
     }  
   }  
   
-  // П6: ничего легального — берём «наименьшее зло» и честно предупреждаем.  
+// П6: ничего легального — сначала «наименьшее зло», но только если оно  
+  // вообще было найдено (fb_bad обновлялся). Пустой скан (ни одного  
+  // кандидата в окне — бывает при битом паспорте clk_max) НЕ прошиваем:  
+  // оставляем текущую шину и честно отказываемся, иначе LO будет битым.  
+  if (!best_legal && fb_bad == UINT64_MAX) {  
+    Serial.println("[QUAD] ОШИБКА: скан не дал ни одного кандидата — "  
+                   "проверьте vfo_max_clk_sys_hz/pll_ceiling. LO не тронут.");  
+    quad_lo_actual_hz = 0;  
+    return;  
+  }  
   if (!best_legal) {  
     Serial.println("[QUAD] ВНИМАНИЕ: нет кандидата с дыркой вне 0..5 кГц — "  
                    "ставлю наименьшее зло (дырка в полосе!)");  
     best        = fb_best;  
     best_div_q8 = fb_div_q8;  
     best_is_int = fb_is_int;  
-  }  
+  }
   
   // Прошиваем выбранную шину тем же путём, что TX (vreg + PLL + flash SSI).  
   // В отличие от исходника, ядро 1 НЕ сбрасываем — TX-тракт уже остановлен  
