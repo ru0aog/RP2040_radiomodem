@@ -16,13 +16,7 @@
 #include "rx_dsp.h"  
 #include "rx_capture.h"  
 #include "../vfo/soft_rx.h"   // vfo_quad_lo_hz()  
-  
-// RSID-модуль модема пока каркасный; вызовы опциональны — подключаются,  
-// когда появится реализация (слабые символы → безопасно без RSID).  
-extern "C" {  
-    void rsid_rx_push(int16_t s) __attribute__((weak));  
-    void rsid_rx_service_sliced(void) __attribute__((weak));  
-}  
+#include "../rsid/rsid.h"
   
 // ---- Параметры тракта ----  
 #define RX_FS_IN_HZ     (RX_ADC_SAMPLE_RATE_HZ / 2.0f)  // 125 ksps/канал  
