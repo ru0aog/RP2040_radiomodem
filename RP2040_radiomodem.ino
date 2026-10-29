@@ -18,12 +18,21 @@
 //   3) vfo_on_trx_switch() — гашение старого генератора, запуск нового  
 //   4) start нового тракта  
 // ============================================================================  
-#include <Arduino.h>
-#include <Adafruit_TinyUSB.h>
+#include <Arduino.h>  
+#include <Adafruit_TinyUSB.h>   // подтягивает реализацию USB CDC → Serial  
 #include "src/pins.h"  
 #include "src/mem/mem_arena.h"  
 #include "src/trx/trx_control.h"  
 #include "src/vfo/vfo.h"  
+#include "src/vfo/soft_rx.h"    // soft_rx_quad_debug() — разовая диагностика  
+  
+// ============================================================================  
+// РУКОПОЖАТИЕ ЯДЕР  
+// ============================================================================  
+// setup1() на Core 1 может стартовать РАНЬШЕ, чем setup() на Core 0  
+// закончит vfo_init()/trx_init(). Без барьера vfo_on_trx_switch уйдёт  
+// по s_eng_rx == nullptr и молча пропадёт — типичная причина «тишины».  
+static volatile bool core0_ready = false;  
   
 // ============================================================================  
 // setup() — Core 0. Порядок инициализации важен:  
@@ -42,67 +51,98 @@ void setup() {
   Serial.println("RP2040_radiomodem — полудуплексный цифровой радиомодем");  
   Serial.println("====================================================");  
   
-  // 1. Карта GPIO: квадратура 0/1, TX 2, ДПФ 6-9, I2C 4/5, энкодер 19-21.  
-  pins_init();  
+  pins_init();          // карта GPIO: квад, TX-выход, ДПФ, энкодер  
+  vfo_init();           // регистрация движков: soft_rx / soft_tx / si5351  
+  trx_init(vfo_on_trx_switch);   // mem_arena_init() + hook  
   
-  // 2. VFO: регистрация и init движков (soft_tx→pio0, soft_rx→pio1,  
-  //    si5351→I2C-детект). ДО trx_init() — hook может сработать сразу.  
-  vfo_init();  
-  
-  // 3. TRX: инициализация арены + машина состояний. Hook — единая точка  
-  //    перенастройки частоты при смене направления (split внутри).  
-  trx_init(vfo_on_trx_switch);  
-  
-  // Диагностика каркаса.  
   Serial.printf("mem_arena: TRX pool %u B, SHARED %u B\n",  
                 (unsigned)mem_arena_capacity(MEM_PHASE_RX),  
                 (unsigned)mem_arena_capacity(MEM_PHASE_SHARED));  
   vfo_debug_dump();  
+  
+  // Публиковать ПОСЛЕДНИМ — Core 1 ждёт именно этот флаг.  
+  core0_ready = true;  
 }  
   
 // ============================================================================  
 // Core 1 — реальное время.  
+// Тракты работают только когда состояние стабильно; во время  
+// TRX_SWITCHING оба заглушены.  
 // ============================================================================  
-  
-// Стартовое состояние — RX. Конвейер поднимается на том же ядре, где  
-// будет крутиться его сервисный цикл (DMA-callbacks привязаны к core1).  
 void setup1() {  
+  // Дождаться инициализации Core 0: pins/vfo/trx должны быть готовы,  
+  // иначе старт квада попадёт по незарегистрированным движкам.  
+  while (!core0_ready) tight_loop_contents();  
+  
+  // RX — стартовое состояние. Конвейер (пока заглушка) стартует на  
+  // этом же ядре, где будет крутиться его poll-цикл.  
   rx_pipeline_start();  
+  
+  // Явный старт квадратурного LO: trx_switch(TRX_RX) отсекается как  
+  // "уже в состоянии", поэтому дёргаем hook напрямую.  
+  // Частота приёма 14074 кГц → физический LO ~14063 кГц на GP0/GP1.  
+  vfo_on_trx_switch(TRX_RX, 14074000);  
+  
+  // Разовая диагностика SM после перестройки clk_sys  
+  // (delay нужен и для пересинхронизации USB CDC после смены шины).  
+  delay(100);  
+  soft_rx_quad_debug();  
 }  
   
 void loop1() {  
-  // Обработать отложенный trx_switch() с Core 0. Во время перехода  
-  // (TRX_SWITCHING) оба тракта заглушены — дальше не идём.  
-  trx_poll_core1();  
-  
-  // Сервис активного VFO-движка: в TX — MASH-дизеринг clkdiv,  
-  // в RX — пустой вызов у квадратуры. Одна проверка указателя.  
-  vfo_poll();  
+  trx_poll_core1();      // обработать pending trx_switch() с Core 0  
   
   if (trx_state() == TRX_RX) {  
-    // TODO(src/rx): rx_capture_pump() → rx_dsp() → очереди в декодеры  
-    //   - перезапуск ADC/DMA по заполнению буфера  
-    //   - DDC (NCO = f_rx − vfo_quad_lo_hz()), децимация  
-    //   - демодуляция → базовая полоса в очередь на Core 0  
+    // TODO(src/rx): rx_capture pump → rx_dsp → audio/decoder queues  
   } else {  
-    // TODO(src/tx): такт символов → модулятор → vfo_tone(index)  
-    //   - генератор символов режима (RTTY/CW/MFSK/JTTY...)  
-    //   - выбор тона из VfoBank по символу  
-    //   - ФЧХ-паузы: vfo_tone(VFO_TONE_NONE)  
+    // TODO(src/tx): symbol timing → modulator → vfo_tone()  
   }  
+  
+  // Сервис активного VFO-движка: дизеринг clkdiv в TX-фазе  
+  // (soft_tx_poll), у квадратуры и Si5351 — пустой poll.  
+  vfo_poll();  
 }  
   
 // ============================================================================  
 // Core 0 — приложение.  
 // ============================================================================  
-void loop() {  
+void loop() {
+
+
+
+// Временный тест в loop(): каждые 5 с — 1 с передачи тона 0 на 14074 кГц.  
+// Ищите несущую на SDR около 14.074 МГц (см. actual_hz в логе).  
+static uint32_t t_test = 0;  
+if (millis() - t_test > 5000) {  
+  t_test = millis();  
+  
+  vfo_bank_set_grid(14074000, 1000, 4);   // 4 тона: 14074/14075/14076/14077 кГц  
+  
+  bool ok = trx_switch(TRX_TX, 14074000); // → stop RX → arena → vfo_on_trx_switch  
+  Serial.printf("[TEST] switch TX: %s\n", ok ? "OK" : "FAIL");  
+  if (!ok) return;                        // таймаут/занято — пропускаем цикл  
+  
+  vfo_tone(0);                            // тон 0 = несущая 14074 кГц  
+  delay(1000);                            // держим 1 с — меандр на GP2  
+  vfo_tone(VFO_TONE_NONE);                // несущая снята  
+  
+  Serial.printf("[TEST] actual=%lu Hz, clk_sys=%lu Hz\n",  
+                (unsigned long)vfo_actual_hz(),  
+                (unsigned long)vfo_clk_sys_hz());  
+  
+  trx_switch(TRX_RX, 14074000);           // обратно на квадратурный LO  
+}
+
+
+
+
   // TODO(src/cat): Kenwood TS-2000 CAT-парсер  
   //   - команда TX/RX → trx_switch(TRX_TX/TRX_RX, freq)  
   //   - установка частоты → vfo_bank_set_*()  
   //   - выбор режима → подключение модулятора/демодулятора  
   //  
   // TODO(src/app):  
-  //   - планировщик передач (maпки/окна из scheduler.h маяка)  
+  //   - планировщик передач (карты/окна из scheduler.h маяка)  
   //   - декодеры + RSID (очереди из loop1, без блокировок)  
   //   - файловая система / USB-MSC (SET.TXT: XOSC_PPB, пины, расписание)  
   //   - датчики (BME280), LCD, LED-индикация, кнопка/энкодер  
@@ -110,6 +150,23 @@ void loop() {
   // Термогвард VFO: >80°C → откат разгона, <60°C → возврат.  
   // В RX-фазе сам пропускает замер (ADC занят входом).  
   vfo_thermal_guard();  
+  
+  // Тест передачи ОТКЛЮЧЁН — только приём.  
+  // Раскомментировать для проверки TX на SDR:  
+  /*  
+  static uint32_t t_test = 0;  
+  if (millis() - t_test > 5000) {  
+    t_test = millis();  
+    vfo_bank_set_grid(14074000, 1000, 4);   // 4 тона по 1 кГц от 14074 кГц  
+    trx_switch(TRX_TX, 14074000);  
+    vfo_tone(0);  
+    delay(1000);  
+    vfo_tone(VFO_TONE_NONE);  
+    trx_switch(TRX_RX, 14074000);  
+    Serial.printf("tx test done, actual=%lu Hz\n",  
+                  (unsigned long)vfo_actual_hz());  
+  }  
+  */  
   
   // Периодическая диагностика: водяной знак арены + состояние.  
   static uint32_t t_diag = 0;  
