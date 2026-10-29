@@ -1,3 +1,5 @@
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ru0aog/RP2040_radiomodem)
+
 # RP2040_radiomodem  
   
 Цифровой радиомодем на RP2040 (полудуплекс): SDR-приёмник и  
