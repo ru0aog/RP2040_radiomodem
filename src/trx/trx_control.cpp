@@ -14,11 +14,20 @@
 //   3. VFO hook                    — гашение старого генератора,  
 //                                    запуск нового на freq_hz (split);  
 //   4. start нового тракта.  
+//  
+// ВНИМАНИЕ: шаг 3 может занимать СОТНИ миллисекунд — PLL-сканер  
+// VFO перебирает конфигурации clk_sys с замерами. Поэтому таймаут  
+// trx_switch() — 3 секунды, а не «микросекунды перехода».  
 // ============================================================================  
 #include "trx_control.h"  
 #include "../mem/mem_arena.h"  
 #include "pico/multicore.h"     // get_core_num(), tight_loop_contents()  
 #include "hardware/sync.h"      // __dmb()  
+  
+// Таймаут ожидания завершения переключения на Core 1.  
+// Должен покрывать худший случай VFO-hook: полный PLL-скан clk_sys  
+// (десятки кандидатов x замер качества) + старт PIO.  
+#define TRX_SWITCH_TIMEOUT_MS  3000  
   
 // ============================================================================  
 // СОСТОЯНИЕ (volatile — видно обоим ядрам)  
@@ -67,6 +76,7 @@ void trx_poll_core1(void) {
   interrupts();  
   
   s_state = TRX_SWITCHING;  
+  __dmb();  
   
   // 1. Остановить активный тракт. Дёргаем ОБА stop — один из них  
   //    и так бездействует, а гарантия тишины полная (каждый stop  
@@ -80,6 +90,7 @@ void trx_poll_core1(void) {
   
   // 3. VFO — до старта тракта, чтобы частота не уходила при живом  
   //    генераторе. Здесь же гашение старого генератора (полудуплекс).  
+  //    МОЖЕТ ЗАНЯТЬ СОТНИ МС — PLL-скан clk_sys внутри движка.  
   if (s_vfo) s_vfo(target, freq);  
   
   // 4. Старт нового тракта.  
@@ -88,9 +99,10 @@ void trx_poll_core1(void) {
   
   s_state = target;  
   __dmb();                  // гарантировать видимость состояния на Core 0  
-  s_req_active = false;  
-  __dmb();  
   s_req_done = true;  
+  __dmb();  
+  s_req_active = false;     // закрыть запрос ПОСЛЕ done — иначе Core 0  
+                          // увидит "свободно" при незавершённом переходе  
 }  
   
 // ============================================================================  
@@ -108,13 +120,18 @@ bool trx_switch(TrxState target, uint32_t freq_hz) {
   __dmb();  
   s_req_active   = true;                   // публиковать последним  
   
-  // Ждём, пока Core 1 выполнит последовательность. Таймаут 100 мс —  
-  // страховка от мёртвого loop1() (не должно срабатывать в норме:  
-  // полный переход — микросекунды).  
+  // Ждём, пока Core 1 выполнит последовательность. Таймаут должен  
+  // покрывать PLL-скан VFO — это СОТНИ миллисекунд, не микросекунды.  
   uint32_t t0 = millis();  
   while (!s_req_done) {  
-    if (millis() - t0 > 100) {  
-      s_req_active = false;  
+    if (millis() - t0 > TRX_SWITCH_TIMEOUT_MS) {  
+      // НЕ сбрасываем s_req_active: Core 1, если жив, завершит  
+      // переход сам и выставит done/state корректно. Сброс здесь  
+      // создавал бы расхождение "переключились, а Core 0 не знает".  
+      Serial.printf("[TRX] switch timeout -> %s (%lu Hz), "  
+                    "state=%d — core1 завис или VFO-скан слишком долгий\n",  
+                    target == TRX_TX ? "TX" : "RX",  
+                    (unsigned long)freq_hz, (int)s_state);  
       return false;  
     }  
     tight_loop_contents();  
@@ -125,5 +142,5 @@ bool trx_switch(TrxState target, uint32_t freq_hz) {
 // ============================================================================  
 // СОСТОЯНИЕ  
 // ============================================================================  
-TrxState trx_state(void)          { return s_state; }  
+TrxState trx_state(void)           { return s_state; }  
 bool     trx_is_transmitting(void) { return s_state == TRX_TX; }
