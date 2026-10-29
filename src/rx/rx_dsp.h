@@ -1,4 +1,4 @@
-// src/rx/rx_dsp.h  
+﻿// src/rx/rx_dsp.h  
 // ============================================================================  
 // DSP-тракт RX: 32-бит слова [Q|I] от rx_capture → центрирование →  
 // NCO-сдвиг → 3 каскада half-band FIR (/8) → базовая полоса int16 I/Q  
@@ -31,7 +31,10 @@ void rx_dsp_set_demod(RxDemod d);
 // Выход аудио (моно int16, RX_DSP_OUT_RATE_HZ) — для декодеров и USB-мика.  
 // Возвращает число выданных сэмплов (0 — данных нет).  
 size_t rx_dsp_get_audio(int16_t *out, size_t max_samples);  
-  
+
+// src/rx/rx_dsp.h  
+#define RX_DSP_OUT_RATE_HZ  15625u   // выход декимирующего тракта, сэмплов/с
+
 // Диагностика.  
 uint32_t rx_dsp_dropped_blocks(void);  
 uint32_t rx_dsp_clip_count(void);  
