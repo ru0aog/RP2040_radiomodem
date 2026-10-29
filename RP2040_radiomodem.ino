@@ -132,10 +132,15 @@ void setup1() {
   rx_capture_start();               // DMA запускаем ПОСЛЕ настройки NCO
 }  
   
+volatile uint32_t dbg_l1 = 0, dbg_poll_in = 0, dbg_poll_out = 0;  
+  
 void loop1() {  
+  ++dbg_l1;  
   trx_poll_core1();  
   if (trx_state() == TRX_RX) {  
-    rx_dsp_poll();                  // выкачка DMA-блоков + DSP + RSID-сервис  
+    ++dbg_poll_in;  
+    rx_dsp_poll();  
+    ++dbg_poll_out;  
   } else {  
     vfo_poll();  
   }  
