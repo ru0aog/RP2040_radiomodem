@@ -1,79 +1,119 @@
-// src/trx/trx_control.cpp  
+﻿// src/trx/trx_control.cpp  
+// ============================================================================  
+// Машина состояний приём/передача (полудуплексный модем).  
+//  
+// Переключение инициируется с Core 0 через trx_switch(), а исполняется  
+// на Core 1 в trx_poll_core1() — там живут DMA/PIO обоих трактов.  
+// Транспорт ядро→ядро — флаги + барьеры памяти (__dmb), без спинлоков:  
+// переключение событие редкое и взаимоисключающее, одного витка  
+// pending-флага достаточно.  
+//  
+// Последовательность на Core 1 (жёстко фиксирована):  
+//   1. stop обоих трактов          — тишина гарантирована;  
+//   2. mem_arena_switch(фаза)      — таблицы ушедшей фазы мертвы;  
+//   3. VFO hook                    — гашение старого генератора,  
+//                                    запуск нового на freq_hz (split);  
+//   4. start нового тракта.  
+// ============================================================================  
 #include "trx_control.h"  
 #include "../mem/mem_arena.h"  
+#include "pico/multicore.h"     // get_core_num(), tight_loop_contents()  
+#include "hardware/sync.h"      // __dmb()  
   
+// ============================================================================  
+// СОСТОЯНИЕ (volatile — видно обоим ядрам)  
+// ============================================================================  
 static volatile TrxState s_state = TRX_RX;  
 static TrxVfoHook        s_vfo   = nullptr;  
   
-// ---- Weak-заглушки конвейеров. При появлении реальных реализаций  
-// в src/rx/ и src/tx/ линкер подставит их автоматически. ----  
-__attribute__((weak)) void rx_pipeline_stop()  {}  
-__attribute__((weak)) void rx_pipeline_start() {}  
-__attribute__((weak)) void tx_pipeline_stop()  {}  
-__attribute__((weak)) void tx_pipeline_start() {}  
+// Отложенный запрос на переключение: Core 0 пишет, Core 1 исполняет.  
+static volatile TrxState s_pending      = TRX_RX;  
+static volatile uint32_t s_pending_freq = 0;  
+static volatile bool     s_req_active   = false;  
+static volatile bool     s_req_done     = false;  
   
-// Переключение должно исполняться на Core 1, где живут тракты.  
-// Простейший транспорт ядро→ядро через флаг: loop1() крутит  
-// trx_poll_core1(), Core 0 ждёт подтверждения.  
-static volatile TrxState   s_pending = TRX_RX;  
-static volatile uint32_t   s_pending_freq = 0;  
-static volatile bool       s_req_active  = false;  
-static volatile bool       s_req_done    = false;  
+// ============================================================================  
+// WEAK-ЗАГЛУШКИ КОНВЕЙЕРОВ  
+// extern "C" — то же соглашение, что в заголовке: при появлении реальных  
+// реализаций в src/rx/ и src/tx/ линкер подставит их вместо заглушек.  
+// ============================================================================  
+extern "C" {  
+__attribute__((weak)) void rx_pipeline_stop(void)  {}  
+__attribute__((weak)) void rx_pipeline_start(void) {}  
+__attribute__((weak)) void tx_pipeline_stop(void)  {}  
+__attribute__((weak)) void tx_pipeline_start(void) {}  
+}  
   
+// ============================================================================  
+// ИНИЦИАЛИЗАЦИЯ (Core 0, из setup() ПОСЛЕ vfo_init())  
+// ============================================================================  
 void trx_init(TrxVfoHook vfo_hook) {  
-  s_vfo   = vfo_hook;  
-  s_state = TRX_RX;  
+  s_vfo         = vfo_hook;  
+  s_state       = TRX_RX;  
+  s_req_active  = false;  
+  s_req_done    = false;  
   mem_arena_init();  
 }  
   
-void trx_poll_core1() {  
-  // Вызывать каждую итерацию loop1().  
+// ============================================================================  
+// ОБРАБОТЧИК НА CORE 1 — дёргать каждую итерацию loop1()  
+// ============================================================================  
+void trx_poll_core1(void) {  
   if (!s_req_active) return;  
+  
   noInterrupts();  
-  TrxState target    = s_pending;  
-  uint32_t freq      = s_pending_freq;  
+  TrxState target   = s_pending;  
+  uint32_t freq     = s_pending_freq;  
   interrupts();  
   
   s_state = TRX_SWITCHING;  
   
-  // 1. Остановить активный тракт (оба уже должны быть тихими, но  
-  //    дешевле дернуть оба, чем рассуждать о направлении).  
+  // 1. Остановить активный тракт. Дёргаем ОБА stop — один из них  
+  //    и так бездействует, а гарантия тишины полная (каждый stop  
+  //    идемпотентен).  
   rx_pipeline_stop();  
   tx_pipeline_stop();  
   
-  // 2. Мёртвая фаза отдаёт память; новая становится активной.  
+  // 2. Уходящая фаза отдаёт общую область SRAM; новая фаза  
+  //    становится активной и начинает с чистого пула.  
   mem_arena_switch(target == TRX_TX ? MEM_PHASE_TX : MEM_PHASE_RX);  
   
-  // 3. VFO — последним до старта, чтобы не было ухода частоты  
-  //    при живом тракте.  
+  // 3. VFO — до старта тракта, чтобы частота не уходила при живом  
+  //    генераторе. Здесь же гашение старого генератора (полудуплекс).  
   if (s_vfo) s_vfo(target, freq);  
   
   // 4. Старт нового тракта.  
   if (target == TRX_TX) tx_pipeline_start();  
   else                  rx_pipeline_start();  
   
-  s_state     = target;  
+  s_state = target;  
+  __dmb();                  // гарантировать видимость состояния на Core 0  
   s_req_active = false;  
-  __dmb();          // arm: гарантировать видимость флага на Core 0  
-  s_req_done  = true;  
+  __dmb();  
+  s_req_done = true;  
 }  
   
+// ============================================================================  
+// ЗАПРОС ПЕРЕКЛЮЧЕНИЯ — только с Core 0  
+// ============================================================================  
 bool trx_switch(TrxState target, uint32_t freq_hz) {  
   MEM_ASSERT(target == TRX_RX || target == TRX_TX);  
-  if (get_core_num() != 0) return false;   // только с Core 0  
-  if (target == s_state && !s_req_active) return true;  
-  if (s_req_active) return false;          // переключение уже идёт  
+  if (get_core_num() != 0) return false;   // только приложение  
+  if (s_req_active)          return false; // переключение уже идёт  
+  if (target == s_state)     return true;  // уже там — ничего делать  
   
   s_pending_freq = freq_hz;  
   s_pending      = target;  
   s_req_done     = false;  
   __dmb();  
-  s_req_active   = true;  
+  s_req_active   = true;                   // публиковать последним  
   
-  // Ждём, пока Core 1 обработает. Таймаут — страховка от мёртвого loop1().  
+  // Ждём, пока Core 1 выполнит последовательность. Таймаут 100 мс —  
+  // страховка от мёртвого loop1() (не должно срабатывать в норме:  
+  // полный переход — микросекунды).  
   uint32_t t0 = millis();  
   while (!s_req_done) {  
-    if (millis() - t0 > 100) {             // не должно случаться  
+    if (millis() - t0 > 100) {  
       s_req_active = false;  
       return false;  
     }  
@@ -82,5 +122,8 @@ bool trx_switch(TrxState target, uint32_t freq_hz) {
   return (s_state == target);  
 }  
   
-TrxState trx_state()           { return s_state; }  
-bool     trx_is_transmitting() { return s_state == TRX_TX; }
+// ============================================================================  
+// СОСТОЯНИЕ  
+// ============================================================================  
+TrxState trx_state(void)          { return s_state; }  
+bool     trx_is_transmitting(void) { return s_state == TRX_TX; }
