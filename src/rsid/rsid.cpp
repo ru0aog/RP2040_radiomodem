@@ -171,26 +171,133 @@ static void rsid_search(void) {
   
 // Срез работы RSID-детектора: вызывается из rx_dsp_poll() на Core 1  
 // после каждого обработанного входного блока. Держать коротким.  
-void rsid_rx_service_sliced(void) {  
-    // Накапливаем окно из очереди  
-    while (inq_tail != inq_head && win_fill < RSID_FFT_N) {  
-        win_buf[win_fill++] = inq_buf[inq_tail];  
-        inq_tail = (uint16_t)((inq_tail + 1) % RSID_INQ_DEPTH);  
-    }  
-    if (win_fill < RSID_FFT_N) return;  
+// ---- Конечный автомат RSID (мелкие срезы между DSP-блоками) ----  
+enum RsidSm {  
+    RSID_SM_COLLECT = 0,   // дренаж входной очереди в окно  
+    RSID_SM_FFT     = 1,   // БПФ — по одной ступени (stage) за вызов, всего 9  
+    RSID_SM_SEARCH  = 2,   // поиск — по одной моде за вызов  
+    RSID_SM_PUBLISH = 3,   // запись результата  
+};  
+static volatile uint8_t rsid_sm = RSID_SM_COLLECT;  
+static uint8_t  fft_stage   = 0;   // 0..8 (len = 2<<stage)  
+static uint8_t  search_mode = 0;   // индекс моды в текущем проходе поиска  
   
-    // Перекрытие 50%: вторая половина становится началом  
-    for (int i = 0; i < RSID_FFT_N; i++) {  
-        fft_re[i] = (float)win_buf[i];  
-        fft_im[i] = 0.0f;  
-    }  
-    memmove(win_buf, win_buf + RSID_FFT_N / 2,  
-            (RSID_FFT_N / 2) * sizeof(int16_t));  
-    win_fill = RSID_FFT_N / 2;  
+// Результат частичного поиска — накапливается по мере перебора мод.  
+static float search_best       = 0.0f;  
+static int   search_best_mode  = -1;  
+static int   search_best_base  = 0;  
+static float search_mag[RSID_FFT_N / 2];  
   
-    rsid_fft();  
-    rsid_search();  
+// Одна ступень БПФ (len = 2..512). Делаем ровно один len за вызов.  
+static void rsid_fft_stage(int stage) {  
+    int len  = 2 << stage;          // 2,4,...,512  
+    int half = len >> 1;  
+    int step = RSID_FFT_N / len;  
+    for (int i = 0; i < RSID_FFT_N; i += len) {  
+        for (int j = 0; j < half; j++) {  
+            float wr = tw_re[j * step], wi = tw_im[j * step];  
+            int a = i + j, b = a + half;  
+            float xr = fft_re[b] * wr - fft_im[b] * wi;  
+            float xi = fft_re[b] * wi + fft_im[b] * wr;  
+            fft_re[b] = fft_re[a] - xr; fft_im[b] = fft_im[a] - xi;  
+            fft_re[a] += xr;            fft_im[a] += xi;  
+        }  
+    }  
 }  
+  
+// Битреверсная перестановка — тоже отдельным срезом (stage == -1 условно;  
+// проще: влить в первый вызов FFT до ступеней).  
+static void rsid_bitrev_all(void) {  
+    for (int i = 0; i < RSID_FFT_N; i++) {  
+        uint16_t j = bitrev_tab[i];  
+        if (j > (uint16_t)i) {  
+            float t = fft_re[i]; fft_re[i] = fft_re[j]; fft_re[j] = t;  
+            t = fft_im[i]; fft_im[i] = fft_im[j]; fft_im[j] = t;  
+        }  
+    }  
+}  
+  
+// Один срез поиска: все базовые смещения для ОДНОЙ моды.  
+static void rsid_search_slice(int m) {  
+    for (int base = 0; base < 200; base++) {  
+        float acc = 0.0f;  
+        int   ok  = 1;  
+        for (int s = 0; s < RSID_NSYMBOLS && ok; s++) {  
+            int off = base + s * 34 + rsid_seqs[m].sym[s] * 2;  
+            if (off >= RSID_FFT_N / 2) { ok = 0; break; }  
+            acc += search_mag[off] + search_mag[off + 1];  
+        }  
+        if (ok && acc > search_best) {  
+            search_best      = acc;  
+            search_best_mode = m;  
+            search_best_base = base;  
+        }  
+    }  
+}  
+  
+void rsid_rx_service_sliced(void) {  
+    switch (rsid_sm) {  
+  
+    case RSID_SM_COLLECT: {  
+        // Дренаж очереди — ограниченный срез.  
+        int budget = 64;  
+        while (budget-- > 0 && inq_tail != inq_head &&  
+               win_fill < RSID_FFT_N) {  
+            win_buf[win_fill++] = inq_buf[inq_tail];  
+            inq_tail = (uint16_t)((inq_tail + 1) % RSID_INQ_DEPTH);  
+        }  
+        if (win_fill >= RSID_FFT_N) {  
+            // Загрузка окна в БПФ + скольжение на пол-окна.  
+            for (int i = 0; i < RSID_FFT_N; i++) {  
+                fft_re[i] = (float)win_buf[i];  
+                fft_im[i] = 0.0f;  
+            }  
+            memmove(win_buf, win_buf + RSID_FFT_N / 2,  
+                    (RSID_FFT_N / 2) * sizeof(int16_t));  
+            win_fill  = RSID_FFT_N / 2;  
+            fft_stage = -1;             // сначала битреверс  
+            rsid_sm   = RSID_SM_FFT;  
+        }  
+        break;  
+    }  
+  
+    case RSID_SM_FFT:  
+        if (fft_stage < 0) {  
+            rsid_bitrev_all();  
+            fft_stage = 0;  
+            break;                      // один срез — только перестановка  
+        }  
+        rsid_fft_stage(fft_stage);  
+        if (++fft_stage >= 9) {         // ступеней 9 (len=2..512)  
+            // Магнитуды — маленький срез, можно здесь же.  
+            for (int i = 0; i < RSID_FFT_N / 2; i++)  
+                search_mag[i] = fft_re[i] * fft_re[i] + fft_im[i] * fft_im[i];  
+            search_best      = 0.0f;  
+            search_best_mode = -1;  
+            search_best_base = 0;  
+            search_mode      = 0;  
+            rsid_sm          = RSID_SM_SEARCH;  
+        }  
+        break;  
+  
+    case RSID_SM_SEARCH:  
+        rsid_search_slice(search_mode);  
+        if (++search_mode >= (int)rsid_seqs_n)  
+            rsid_sm = RSID_SM_PUBLISH;  
+        break;  
+  
+    case RSID_SM_PUBLISH:  
+        if (search_best_mode >= 0 && search_best > 1e6f && !res_pending) {  
+            res.code    = rsid_modes[search_best_mode].code;  
+            res.name    = rsid_modes[search_best_mode].name;  
+            res.freq_hz = (float)search_best_base * RSID_BIN_HZ;  
+            __dmb();  
+            res_pending = true;  
+        }  
+        rsid_sm = RSID_SM_COLLECT;      // следующее окно  
+        break;  
+    }  
+}
   
 // ---- Диспетчеризация результата на Core 0 ----  
 extern void rx_decoders_on_rsid(uint16_t code);    // из rx_decoders.cpp  
