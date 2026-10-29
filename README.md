@@ -8,8 +8,6 @@
 - Сборка: Arduino-Pico (Earle Philhower), TinyUSB-стек, FQBN  
   `rp2040:rp2040:generic`.
 
-## Структура проекта
-
 ### Структура проекта
 
 ```text
