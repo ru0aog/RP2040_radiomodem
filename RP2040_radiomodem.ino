@@ -133,12 +133,10 @@ void setup1() {
 }  
   
 void loop1() {  
-  trx_poll_core1();                 // 1. события переключения  
+  trx_poll_core1();  
   if (trx_state() == TRX_RX) {  
-    rx_dsp_poll();                  // 2. RX-конвейер (КАРКАС): обработка блоков  
-    // TODO: rx_capture_feed() — выкачка DMA-блоков в rx_dsp_push_block  
+    rx_dsp_poll();                  // выкачка DMA-блоков + DSP + RSID-сервис  
   } else {  
-    vfo_poll();                     // 3. TX-фаза: сервис MASH-дизеринга  
+    vfo_poll();  
   }  
-  // TODO: thermal_guard / watchdog feed — по реальному тракту  
 }
