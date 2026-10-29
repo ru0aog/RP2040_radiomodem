@@ -5,20 +5,20 @@
 #include <Arduino.h>  
 #include "src/mem/mem_arena.h"  
 #include "src/trx/trx_control.h"  
-  
-// Перенастройка VFO при смене направления (заглушка до src/vfo/).  
-static void vfo_switch_hook(TrxState next, uint32_t freq_hz) {  
-  // TODO(src/vfo): tune_rx()/tune_tx(), split  
-  Serial.printf("VFO -> %s %lu Hz\n", next == TRX_TX ? "TX" : "RX",  
-                (unsigned long)freq_hz);  
-}  
+#include "src/vfo/vfo.h"  
+#include "src/vfo/soft_tx.h"      // soft_tx_poll() — дизеринг в фазе TX  
   
 void setup() {  
   pinMode(LED_BUILTIN, OUTPUT);  
   Serial.begin(115200);  
   while (!Serial && millis() < 2000) {}  
   
-  trx_init(vfo_switch_hook);  
+  // VFO инициализируем ДО trx: trx_init() может вызвать hook  
+  // (vfo_on_trx_switch), который обращается к зарегистрированным  
+  // движкам.  
+  vfo_init();  
+  trx_init(vfo_on_trx_switch);  
+  
   Serial.printf("mem_arena: TRX pool %u B, SHARED %u B\n",  
                 (unsigned)mem_arena_capacity(MEM_PHASE_RX),  
                 (unsigned)mem_arena_capacity(MEM_PHASE_SHARED));  
@@ -27,7 +27,8 @@ void setup() {
 // ---- Core 1: реальное время. Тракты работают только когда состояние  
 // стабильно; во время TRX_SWITCHING оба заглушены. ----  
 void setup1() {  
-  // RX — стартовое состояние.  
+  // RX — стартовое состояние. Конвейер стартует на этом же ядре,  
+  // где будет крутиться его poll-цикл.  
   rx_pipeline_start();  
 }  
   
@@ -37,7 +38,9 @@ void loop1() {
   if (trx_state() == TRX_RX) {  
     // TODO(src/rx): rx_capture pump → rx_dsp → audio/decoder queues  
   } else {  
-    // TODO(src/tx): symbol timing → modulator → PIO/DDS  
+    // MASH-дизеринг делителя PIO — одна запись clkdiv за итерацию.  
+    soft_tx_poll();  
+    // TODO(src/tx): symbol timing → modulator → vfo_tone()  
   }  
 }  
   
@@ -45,6 +48,9 @@ void loop1() {
 void loop() {  
   // TODO(src/cat): Kenwood TS-2000 CAT parser → trx_switch()  
   // TODO(src/app): scheduler, decoders/RSID, files/MSC, sensors, LCD  
+  
+  // Термогвард VFO — понижение разгона при перегреве.  
+  vfo_thermal_guard();  
   
   // Диагностика водяного знака раз в 10 с.  
   static uint32_t t = 0;  
