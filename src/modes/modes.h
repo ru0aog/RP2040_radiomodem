@@ -11,10 +11,9 @@
 typedef enum {  
   MODE_NONE = 0,  
   MODE_AX25,  
-  MODE_RTTY,  
-  MODE_JT65,  
-  // ...  
-} ModeId;  
+  MODE_CW,        // NEW  
+  MODE_COUNT  
+} ModeId;
   
 struct ModeIface {  
   ModeId id;  
