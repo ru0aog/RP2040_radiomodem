@@ -1,5 +1,19 @@
 // src/rx/rx_decoders.h  
-void rx_decoders_init(void);  
-void rx_decoders_select(const ModeIface* m); // активная мода → поток  
-void rx_decoders_feed(int16_t mono);         // вызов из rx_dsp на каждый сэмпл  
-void rx_decoders_on_rsid(uint8_t code);      // колбэк от rsid-модуля
+// ============================================================================  
+// Маршрутизатор декодеров: активная мода получает сэмплы из rx_dsp,  
+// RSID-автодетект переключает моду. Моды живут в src/modes/<name>/.  
+// ============================================================================  
+#pragma once  
+#include <Arduino.h>  
+  
+typedef enum {  
+  RX_MODE_NONE = 0,  
+  RX_MODE_AX25,  
+  // RX_MODE_RTTY, RX_MODE_FT8, ... — расширяется при порте мод  
+} RxModeId;  
+  
+void     rx_decoders_init(void);  
+void     rx_decoders_poll(void);              // вызов из loop() на Core 0  
+void     rx_decoders_set_mode(RxModeId id);   // ручной выбор  
+RxModeId rx_decoders_mode(void);  
+void     rx_decoders_on_rsid(uint16_t code);  // колбэк от RSID → автодетект
