@@ -34,7 +34,9 @@ volatile bool core0_ready = false;
   
 void setup() {  
   Serial.begin(115200);  
-  delay(300);  
+ 
+  while (!Serial && millis() < 5000) delay(1);
+
   Serial.println();  
   Serial.println("RP2040_radiomodem — полудуплексный цифровой радиомодем");  
   Serial.println("====================================================");  
@@ -50,7 +52,6 @@ void setup() {
   
   // ---- Каркас приложения (заглушки — печатают [STUB], железа не трогают) ----  
   rx_dsp_init();  
-  rx_capture_start();  
   rx_decoders_init();  
   rsid_init();  
   usb_audio_init();  
@@ -97,7 +98,18 @@ void loop() {
                   trx_state() == TRX_TX ? "TX" :  
                   trx_state() == TRX_RX ? "RX" : "SWITCHING",  
                   (unsigned)vfo_tone_active(),  
-                  (unsigned long)vfo_clk_sys_hz());  
+                  (unsigned long)vfo_clk_sys_hz());
+  static uint32_t t_rxdbg = 0;  
+  if (millis() - t_rxdbg > 30000) {  
+    t_rxdbg = millis();  
+    rx_dsp_debug();  
+  }
+    Serial.printf("cap_isr=%lu drop=%lu(scratch=%lu qfull=%lu busy=%lu) ",  
+                  (unsigned long)rx_cap_isr_count,  
+                  (unsigned long)rx_capture_dropped(),  
+                  (unsigned long)rx_drop_scratch,  
+                  (unsigned long)rx_drop_queue_full,  
+                  (unsigned long)rx_drop_busy);
   }  
 }  
   
@@ -114,7 +126,10 @@ void setup1() {
   // до первого trx_switch.  
   vfo_on_trx_switch(TRX_RX, 14074000);  
   delay(100);                       // пересинхронизация USB CDC + старт SM  
-  soft_rx_quad_debug();             // [LODBG] clkdiv/enabled/lo_hz  
+  soft_rx_quad_debug();             // [LODBG] clkdiv/enabled/lo_hz
+
+  rx_dsp_start(14074000);           // NCO = f_rx - vfo_quad_lo_hz()  
+  rx_capture_start();               // DMA запускаем ПОСЛЕ настройки NCO
 }  
   
 void loop1() {  
