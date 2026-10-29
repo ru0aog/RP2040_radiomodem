@@ -25,11 +25,9 @@
   
 // ---- Параметры приёмного тракта ----------------------------------------  
 // СВЕРИТЬ с src/dsp/rx_dsp.h приёмника при миграции rx_dsp:  
-// RX_IF_SHIFT_HZ в vfo_rp2040.h приёмника = 11000 (в beacon-заголовке 3000 —  
-// там другое значение ПЧ). NCO-зоны взяты из RP2040_receiver.ino:  
+// NCO-зоны взяты из RP2040_receiver.ino:  
 // сладкая зона [9600..14500], запретная [0..5000] (дырка в звуке),  
 // NCO_MAX = половина RX_FS_IN_HZ = 62500 (250 ksps/2 канала /2).  
-#define RX_IF_SHIFT_HZ      11000u  
 #define RX_NCO_SWEET_LO     9600u  
 #define RX_NCO_SWEET_HI     14500u  
 #define RX_NCO_FORBID_LO    0u  
