@@ -34,8 +34,7 @@
 #define RX_NCO_FORBID_LO    0u  
 #define RX_NCO_FORBID_HI    5000u  
 #define RX_NCO_MAX_HZ       62500u  
-#define RX_CLK_SYS_MIN_HZ   80000000ULL   // TODO: сверить с RX_CLK_SYS_MIN_HZ  
-                                          // в vfo_rp2040.h приёмника  
+#define RX_CLK_SYS_MIN_HZ   320000000ULL
 #define VFO_CLK_SYS_NOMINAL 133000000ULL  
   
 // ---- PIO-программа квадратуры: 4 такта на период, 2 соседних пина ------  
