@@ -1,96 +1,124 @@
-// src/vfo/vfo.h  
-// Единый менеджер частот радиомодема.  
+﻿// src/vfo/vfo.h  
+// ============================================================================  
+// Единый менеджер частот радиомодема RP2040_radiomodem.  
+//  
 // Единственная точка входа для всех потребителей: CAT, планировщик,  
 // trx_control, декодеры. Внутренние движки (soft_tx/soft_rx/si5351)  
-// наружу не торчат.  
+// наружу не торчат — менеджер диспетчеризует через VfoEngine.  
+//  
+// Модель: полудуплекс. Одновременно активен ровно один генератор:  
+//  - RX: квадратурный LO (soft_rx, pio1) для SDR-смесителя;  
+//  - TX: дизеринг-генератор (soft_tx, pio0) либо Si5351 (перспектива).  
+// Переключение идёт через vfo_on_trx_switch() — hook trx_control.  
+// ============================================================================  
 #pragma once  
 #include <Arduino.h>  
 #include "../trx/trx_control.h"   // TrxState  
   
-// ---- Бэкенды генерации ----  
+// ============================================================================  
+// БЭКЕНДЫ ГЕНЕРАЦИИ  
+// ============================================================================  
 enum VfoBackend : uint8_t {  
   VFO_BACKEND_NONE = 0,  
-  VFO_BACKEND_SOFT_TX,   // PIO меандр + MASH-дизеринг (передача)  
-  VFO_BACKEND_SOFT_RX,   // PIO квадратура I/Q (гетеродин приёмника)  
+  VFO_BACKEND_SOFT_TX,   // PIO-меандр + MASH-дизеринг (передача)  
+  VFO_BACKEND_SOFT_RX,   // PIO-квадратура I/Q (гетеродин приёмника)  
   VFO_BACKEND_SI5351,    // внешний синтезатор (заглушка, на перспективу)  
 };  
   
-// ---- Банк тонов ----  
-#define VFO_BANK_MAX_TONES  64     // совместимо с VFO_TONES_COUNT исходников  
-#define VFO_TONE_NONE       255  
+// ============================================================================  
+// БАНК ТОНОВ  
+// ============================================================================  
+#define VFO_BANK_MAX_TONES  64    // = SOFT_TX_TONES / VFO_TONES_COUNT исходника  
+#define VFO_TONE_NONE       255   // тишина  
   
-// Частоты храним в миллигерцах (мГц = Гц·1000): точность DDS-расчёта  
-// исходного движка сохраняется без float.  
+// Частоты — в миллигерцах (мГц = Гц×1000): сохраняет точность  
+// DDS-расчёта исходного движка без float.  
 struct VfoBank {  
-  uint64_t freqs_mhz[VFO_BANK_MAX_TONES];  // частота каждого тона, мГц  
-  uint8_t  count;                           // сколько ячеек занято  
+  uint64_t freqs_mhz[VFO_BANK_MAX_TONES];  
+  uint8_t  count;  
 };  
   
-// ======================== API ========================  
+// ============================================================================  
+// ВНЕШНИЙ API МЕНЕДЖЕРА  
+// ============================================================================  
   
-// Инициализация: пины, PIO, чтение калибровок.  
-// Вызывать из setup() до trx_init().  
-void     vfo_init();  
+// Инициализация: пины, PIO, регистрация движков.  
+// Вызывать из setup() ДО trx_init() — hook может сработать сразу.  
+void     vfo_init(void);  
   
-// Выбор аппаратного бэкенда для направления. По умолчанию:  
-// RX → SOFT_RX (квадро-LO), TX → SOFT_TX (дизеринг).  
-// Вызов si5351_set_backend() перебьёт TX на внешний синтезатор.  
+// Выбор бэкенда направления. По умолчанию: RX→SOFT_RX, TX→SOFT_TX.  
+// Например vfo_set_backend(TRX_TX, VFO_BACKEND_SI5351) переводит  
+// передачу на внешний синтезатор.  
 void     vfo_set_backend(TrxState dir, VfoBackend b);  
   
 // --- Банк частот ---  
-// Загрузить банк равномерной сеткой: base + i*step (FSK-сетки  
-// RTTY/MFSK/Olivia). Пересчитывает таблицу делителей PIO.  
+// Равномерная сетка: base + i·step (RTTY/MFSK/Olivia FSK-сетки).  
 void     vfo_bank_set_grid(uint32_t base_hz, double step_hz, uint8_t count);  
-// Загрузить произвольный список частот (JTTY/IFKP-подобные сетки).  
+// Произвольный список частот (JTTY/IFKP-подобные сетки).  
 void     vfo_bank_set_list(const uint32_t *freqs_hz, uint8_t count);  
-const VfoBank *vfo_bank();                  // read-only доступ к банку  
+// Read-only доступ к банку (движки пересчитывают по нему таблицы).  
+const VfoBank *vfo_bank(void);  
   
 // --- Управление тоном ---  
-// Включить тон №index из банка (мгновенная смена делителя PIO,  
-// фаза MASH не сбрасывается). VFO_TONE_NONE — тишина на выходе.  
+// Мгновенная смена тона из банка (фаза генератора не прерывается).  
+// VFO_TONE_NONE — тишина на выходе.  
 void     vfo_tone(uint8_t index);  
-uint8_t  vfo_tone_active();  
+uint8_t  vfo_tone_active(void);  
   
-// --- Приёмный гетеродин ---  
-// Запустить квадратурный LO: на freq_hz−RX_IF_SHIFT_HZ.  
-// Возвращает фактическую частоту LO после квантования clkdiv (для NCO).  
+// --- Приёмный гетеродин (обёртки над RX-бэкендом) ---  
+// Запуск квадратурного LO на freq_hz−RX_IF_SHIFT_HZ.  
+// Возвращает фактическую частоту LO после квантования делителя —  
+// передавать в NCO приёмника.  
 uint32_t vfo_quad_start(uint32_t rx_freq_hz);  
-void     vfo_quad_stop();  
-uint32_t vfo_quad_lo_hz();                  // фактический LO, Гц  
+void     vfo_quad_stop(void);  
+uint32_t vfo_quad_lo_hz(void);  
   
 // --- Разгон (PLL boost) ---  
-// Поднять clk_sys под целевую частоту (пересчёт банка + vreg).  
-// Вызов только в фазе TX, когда RX-конвейер остановлен.  
+// Поднять clk_sys под целевую частоту (скан метрики спуров + vreg).  
+// Только в фазе TX, когда RX-конвейер остановлен.  
 void     vfo_boost_enter(uint32_t target_hz);  
-void     vfo_boost_exit();                  // возврат на номинал 133 МГц  
-bool     vfo_boosted();  
-// Термогвард: понижение при >VFO_THROTTLE_HI_C. Дёргать из loop().  
-void     vfo_thermal_guard();  
+void     vfo_boost_exit(void);           // возврат на номинал 133 МГц  
+bool     vfo_boosted(void);  
   
-// --- Сервис trx_control ---  
-// Hook для trx_init(): останавливает старый генератор, запускает  
-// бэкенд нового направления на freq_hz.  
+// Термогвард: >80°C → откат на номинал, <60°C → возврат в overclock.  
+// Дёргать периодически из loop() на Core 0.  
+void     vfo_thermal_guard(void);  
+  
+// --- Сервисный вызов активного бэкенда ---  
+// Дёргать каждую итерацию loop1(). Для TX это MASH-дизеринг  
+// (soft_tx_poll); у квадратуры и Si5351 poll пустой.  
+void     vfo_poll(void);  
+  
+// --- Hook для trx_control ---  
+// Останавливает старый генератор, перенастраивает, запускает бэкенд  
+// нового направления на freq_hz. Передать в trx_init().  
 void     vfo_on_trx_switch(TrxState next, uint32_t freq_hz);  
   
 // --- Калибровка опоры ---  
-// Коррекция XOSC в ppb, загружается из Flash ([XOSC_PPB] в SET.TXT).  
-extern int32_t vfo_xosc_corr_ppb;  
-uint64_t vfo_xosc_hz();                     // скорректированная опора  
+// Коррекция XOSC в ppb; заполняется из Flash ([XOSC_PPB] в SET.TXT)  
+// файловым менеджером до vfo_init(). До того — дефолт.  
+extern int32_t  vfo_xosc_corr_ppb;  
+uint64_t vfo_xosc_hz(void);              // скорректированная опора, Гц  
   
 // --- Диагностика ---  
-uint32_t vfo_clk_sys_hz();                  // текущая частота шины  
-void     vfo_debug_dump();                  // дамп состояния в Serial  
+uint32_t vfo_clk_sys_hz(void);           // текущая частота шины  
+void     vfo_debug_dump(void);           // дамп состояния в Serial  
   
-// ============ Интерфейс внутренних движков ============  
+// ============================================================================  
+// ИНТЕРФЕЙС ВНУТРЕННИХ ДВИЖКОВ  
+// ============================================================================  
 // Реализуется каждым бэкендом; vfo.cpp только диспетчеризует.  
+// Все вызовы исполняются на Core 1 внутри trx-последовательности  
+// (кроме init — из setup(), и poll — из loop1()).  
 struct VfoEngine {  
-  void     (*init)();  
-  void     (*start)(uint32_t freq_hz);   // запуск генерации  
-  void     (*stop)();                     // тишина на выходе  
-  void     (*tone)(uint8_t index);        // мгновенная смена тона  
-  void     (*poll)();                     // сервисный вызов из loop1()  
-  uint32_t (*actual_hz)();                // фактическая частота  
+  void     (*init)(void);               // резерв ресурсов, загрузка PIO-программ  
+  void     (*start)(uint32_t freq_hz);  // запуск генерации  
+  void     (*stop)(void);               // тишина на выходе  
+  void     (*tone)(uint8_t index);      // мгновенная смена тона из банка  
+  void     (*poll)(void);               // сервисный вызов из loop1()  
+  uint32_t (*actual_hz)(void);          // фактическая частота, Гц  
 };  
-const VfoEngine *vfo_engine_soft_tx();  
-const VfoEngine *vfo_engine_soft_rx();  
-const VfoEngine *vfo_engine_si5351();
+  
+const VfoEngine *vfo_engine_soft_tx(void);  
+const VfoEngine *vfo_engine_soft_rx(void);  
+const VfoEngine *vfo_engine_si5351(void);
