@@ -1,18 +1,16 @@
-// src/modes/modes_registry.cpp  
+﻿// src/modes/modes_registry.cpp  
 // ============================================================================  
-// Реестр мод: таблица ModeIface + доступ по id / rsid_code.  
-// Каждая мода экспортирует const ModeIface из своей папки  
-// (см. ax25_mode.cpp, cw/cw_mode.cpp).  
+// Реестр мод: таблица указателей на ModeIface + доступ по id / rsid_code.  
+// Каждая мода экспортирует аксессор <mode>_mode_iface() (ModeIface у неё  
+// static — прямого символа нет, см. ax25_mode.cpp).  
 // ============================================================================  
 #include "modes.h"  
-  
-// Экспорты мод — имена сверить с определениями в ax25_mode.cpp / cw/.  
-extern const ModeIface ax25_mode;    // src/modes/ax25/ax25_mode.cpp  
-extern const ModeIface cw_mode;      // src/modes/cw/ (если есть)  
+#include "ax25/ax25.h"      // const ModeIface *ax25_mode_iface(void);  
+#include "cw/cw.h"          // const ModeIface *cw_mode_iface(void);  
   
 static const ModeIface* const modes_table[] = {  
-    &ax25_mode,  
-    &cw_mode,  
+    ax25_mode_iface(),  
+    cw_mode_iface(),  
 };  
   
 #define MODES_N (sizeof(modes_table) / sizeof(modes_table[0]))  
