@@ -1,14 +1,21 @@
-// src/mem/mem_arena.cpp  
+﻿// src/mem/mem_arena.cpp  
 #include "mem_arena.h"  
   
-// Размеры подобрать под бюджет 264 КБ SRAM после миграции буферов.  
-// RX-конвейер (FFT 4096 + банки Гёрцеля + Витерби) — самый прожорливый  
-// потребитель; область RX/TX должна вместить max(RX, TX).  
+// ============================================================================  
+// ПУЛЫ. Размеры подобрать по мере миграции буферов:  
+//   - RX-конвейер — самый прожорливый потребитель (FFT-кольца 4096,  
+//     GTZ-банки Гёрцеля, метрики/предшественники Витерби JTTY);  
+//   - область RX/TX должна вместить max(RX-набор, TX-набор);  
+//   - контролируется mem_arena_watermark() из loop() раз в 10 с.  
+// Миграция: большие static-буферы исходников (rx_buf_*, rx_scratch_*,  
+// g_metric_*, g_predecessor, TX-буферы символов) переводятся на  
+// mem_arena_alloc() при переносе модулей — API стабилен с первого коммита.  
+// ============================================================================  
 #ifndef MEM_TRX_POOL_SIZE  
-#define MEM_TRX_POOL_SIZE   (96u * 1024u)   // общая область RX|TX  
+#define MEM_TRX_POOL_SIZE    (96u * 1024u)   // общая область RX|TX  
 #endif  
 #ifndef MEM_SHARED_POOL_SIZE  
-#define MEM_SHARED_POOL_SIZE (8u * 1024u)   // настройки, расписание, CAT  
+#define MEM_SHARED_POOL_SIZE  (8u * 1024u)   // настройки, расписание, CAT  
 #endif  
   
 __attribute__((aligned(16))) static uint8_t s_trx_pool[MEM_TRX_POOL_SIZE];  
@@ -16,11 +23,11 @@ __attribute__((aligned(16))) static uint8_t s_shared_pool[MEM_SHARED_POOL_SIZE];
   
 static size_t   s_trx_offset   = 0;  
 static size_t   s_shared_off   = 0;  
-static size_t   s_trx_high_wm  = 0;  
+static size_t   s_trx_high_wm  = 0;      // водяной знак за всё время  
 static MemPhase s_active       = MEM_PHASE_RX;  
 static bool     s_initialized  = false;  
   
-void mem_arena_init() {  
+void mem_arena_init(void) {  
   s_trx_offset  = 0;  
   s_shared_off  = 0;  
   s_trx_high_wm = 0;  
@@ -31,7 +38,7 @@ void mem_arena_init() {
 void *mem_arena_alloc(MemPhase phase, size_t size, size_t align) {  
   MEM_ASSERT(s_initialized);  
   if (size == 0) return nullptr;  
-  MEM_ASSERT(align && (align & (align - 1)) == 0 && align <= 16);  
+  MEM_ASSERT(align != 0 && (align & (align - 1)) == 0 && align <= 16);  
   
   uint8_t *base;  
   size_t  *offset;  
@@ -42,8 +49,7 @@ void *mem_arena_alloc(MemPhase phase, size_t size, size_t align) {
     offset = &s_shared_off;  
     cap    = MEM_SHARED_POOL_SIZE;  
   } else {  
-    // RX и TX не могут выделять память в неактивной фазе —  
-    // ловим ошибки жизненного цикла на этапе отладки.  
+    // RX/TX могут выделять память только в своей активной фазе.  
     if (phase != s_active) {  
       MEM_ASSERT(false);  
       return nullptr;  
@@ -66,27 +72,30 @@ void *mem_arena_alloc(MemPhase phase, size_t size, size_t align) {
 void mem_arena_release(MemPhase phase) {  
   MEM_ASSERT(s_initialized);  
   MEM_ASSERT(phase != MEM_PHASE_SHARED);  
-  // Область RX/TX общая — сброс действует независимо от того,  
-  // какая фаза её занимала. Вызывать только когда противоположный  
-  // тракт уже остановлен (порядок обеспечивает trx_switch()).  
+  // Область RX/TX общая — сброс действует независимо от того, какая  
+  // фаза её занимала. Водяной знак НЕ сбрасываем: это диагностика.  
   s_trx_offset = 0;  
-  // watermark не трогаем — это диагностика за всё время работы.  
 }  
   
 void mem_arena_switch(MemPhase phase) {  
   MEM_ASSERT(s_initialized);  
   MEM_ASSERT(phase == MEM_PHASE_RX || phase == MEM_PHASE_TX);  
   if (phase == s_active) return;  
-  // Уходящая фаза (RX или TX) полностью освобождает общую область.  
+  // Уходящая фаза полностью освобождает общую область —  
+  // единственная точка, где фаза меняется.  
   s_trx_offset = 0;  
   s_active = phase;  
 }  
   
-size_t mem_arena_watermark() { return s_trx_high_wm; }  
+size_t mem_arena_watermark(void) { return s_trx_high_wm; }  
   
 size_t mem_arena_capacity(MemPhase phase) {  
   return (phase == MEM_PHASE_SHARED) ? MEM_SHARED_POOL_SIZE  
                                      : MEM_TRX_POOL_SIZE;  
 }  
   
-MemPhase mem_arena_active_phase() { return s_active; }
+size_t mem_arena_used(MemPhase phase) {  
+  return (phase == MEM_PHASE_SHARED) ? s_shared_off : s_trx_offset;  
+}  
+  
+MemPhase mem_arena_active_phase(void) { return s_active; }
