@@ -1,6 +1,7 @@
-// src/usb/usb_audio.h — дескриптор UAC-микрофона. КАРКАС.  
-// Подключение: правка tusb_config.h + регистрация ITF в usb_descriptors.  
+﻿// src/usb/usb_audio.h  
 #pragma once  
 #include <Arduino.h>  
   
-void usb_audio_desc_init(void);   // регистрация дескриптора (пока no-op)
+// КАРКАС UAC-микрофона. Реальный дескриптор/стрим — после DSP.  
+void usb_audio_init(void);   // регистрация дескриптора (пока no-op)  
+void usb_audio_poll(void);   // сервисный вызов из loop()
