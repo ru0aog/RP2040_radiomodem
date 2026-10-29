@@ -1,5 +1,5 @@
 ﻿// src/usb/usb_audio.cpp — КАРКАС.  
-#include "usb_audio.h"  
+#include "usb_audio.h"
   
 void usb_audio_init(void) {  
   // TODO: добавить TUD_AUDIO_MIC descriptor в конфиг TinyUSB  
