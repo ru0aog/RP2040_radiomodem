@@ -59,6 +59,13 @@ void setup() {
                 (unsigned)mem_arena_capacity(MEM_PHASE_RX),  
                 (unsigned)mem_arena_capacity(MEM_PHASE_SHARED));  
   vfo_debug_dump();  
+
+  rx_dsp_init();  
+  rx_capture_start();    // вернёт true-заглушку  
+  rx_decoders_init();  
+  rsid_init();  
+  usb_audio_init();  
+  modem_init();  
   
   // Публиковать ПОСЛЕДНИМ — Core 1 ждёт именно этот флаг.  
   core0_ready = true;  
@@ -91,6 +98,8 @@ void setup1() {
   
 void loop1() {  
   trx_poll_core1();      // обработать pending trx_switch() с Core 0  
+
+  rx_dsp_poll();
   
   if (trx_state() == TRX_RX) {  
     // TODO(src/rx): rx_capture pump → rx_dsp → audio/decoder queues  
@@ -108,7 +117,10 @@ void loop1() {
 // ============================================================================  
 void loop() {
 
-
+modem_poll();  
+rx_decoders_poll();  
+rsid_poll();  
+usb_audio_poll(); 
 
 // Временный тест в loop(): каждые 5 с — 1 с передачи тона 0 на 14074 кГц.  
 // Ищите несущую на SDR около 14.074 МГц (см. actual_hz в логе).  
