@@ -24,4 +24,4 @@ typedef void (*ax25_frame_cb_t)(const uint8_t *frame, size_t len);
 void ax25_rx_set_frame_cb(ax25_frame_cb_t cb);  
   
 // ---------- Регистрация ----------  
-const ModeIface *mode_ax25(void);
+const ModeIface *ax25_mode_iface(void);
