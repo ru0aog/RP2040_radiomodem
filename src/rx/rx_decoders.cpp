@@ -1,31 +1,57 @@
-// src/rx/rx_decoders.cpp — маршрутизатор декодеров. КАРКАС.  
+﻿// src/rx/rx_decoders.cpp  
+// ============================================================================  
+// Маршрутизатор декодеров: активная мода получает блоки I/Q от rx_dsp,  
+// RSID-код может переключать активную моду. Работает на Core 0 (loop()).  
+// ============================================================================  
 #include "rx_decoders.h"  
 #include "rx_dsp.h"  
-#include "../modes/ax25/ax25.h"  
+#include "../modes/modes.h"  
   
-static RxModeId s_mode = RX_MODE_NONE;  
+// ---------- Состояние ----------  
+static const ModeIface *s_active   = nullptr;   // активная мода  
+static ModeId           s_active_id = MODE_NONE;  
   
-void rx_decoders_init(void) {  
-  ax25_rx_init(0);  
-  s_mode = RX_MODE_AX25;   // пока единственная мода — выбираем сразу 
-  Serial.println("[STUB] rx_decoders_init: only AX.25 registered");  
+// ---------- API ----------  
+  
+// Активировать моду; вызывает её rx_init с центральной частотой.  
+void rx_decoders_set_mode(ModeId id, uint32_t center_hz) {  
+  s_active    = modes_get(id);  
+  s_active_id = s_active ? id : MODE_NONE;  
+  if (s_active && s_active->rx_init) s_active->rx_init(center_hz);  
+  Serial.printf("[DEC] mode=%s center=%lu Hz\n",  
+                s_active ? s_active->name : "none",  
+                (unsigned long)center_hz);  
 }  
   
-void rx_decoders_poll(void) {
-  // Скелет: вычитываем аудио из rx_dsp и кормим активную моду. 
-  int16_t buf[RX_DSP_BLOCK_SAMPLES];  
-  size_t n = rx_dsp_get_audio(buf, RX_DSP_BLOCK_SAMPLES);  
-  if (n == 0) return;  
-  for (size_t i = 0; i < n; i++) {  
-    switch (s_mode) {  
-      case RX_MODE_AX25: ax25_rx_push(buf[i]); break;  
-      default: break;  
+ModeId rx_decoders_active(void) { return s_active_id; }  
+  
+// Колбэк от RSID: код → мода → rx_decoders_set_mode.  
+void rx_decoders_on_rsid(uint8_t rsid_code, uint32_t center_hz) {  
+  const ModeIface *m = modes_get_by_rsid(rsid_code);  
+  if (!m) return;  
+  Serial.printf("[DEC] RSID=%u -> mode=%s\n", (unsigned)rsid_code, m->name);  
+  rx_decoders_set_mode(m->id, center_hz);  
+}  
+  
+// Вычитка очереди аудио/IQ и передача сэмплов активной моде.  
+// Вызывать из loop() — частота вызовов определяет задержку декода.  
+void rx_decoders_poll(void) {  
+  const int16_t *i_ch, *q_ch;  
+  uint8_t n;  
+  
+  while (rx_dsp_get_audio(&i_ch, &q_ch, &n)) {  
+    for (uint8_t k = 0; k < n; k++) {  
+      // TODO: моно-микс по выбранному демодулятору; пока — I-канал.  
+      int16_t m = i_ch[k];  
+      if (s_active && s_active->rx_push) s_active->rx_push(m);  
     }  
+    rx_dsp_release_audio();        // вернуть блок в очередь  
   }  
-}  
-  
-void rx_decoders_set_mode(RxModeId id) { s_mode = id; }  
-RxModeId rx_decoders_mode(void)        { return s_mode; }  
-void rx_decoders_on_rsid(uint16_t code) {  
-  Serial.printf("[STUB] rsid code %u — mode mapping not implemented\n", code);  
+}
+
+
+void rx_decoders_init(void) {  
+  s_active    = NULL;  
+  s_active_id = MODE_NONE;  
+  Serial.println("[STUB] rx_decoders init");  
 }
