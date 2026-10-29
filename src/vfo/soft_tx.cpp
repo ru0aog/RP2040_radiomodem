@@ -571,7 +571,7 @@ static void rebuild_table(void) {
   const VfoBank *bank = vfo_bank();  
   for (int i = 0; i < SOFT_TX_TONES; i++) {  
     if (bank && i < bank->count)  
-      s_tones[i] = calc_params_mhz(current_clk_sys_hz, bank->freqs_mhz[i]);  
+      s_tones[i] = calc_params_mhz(current_clk_sys_hz, bank->freqs_hz[i]);
     else  
       s_tones[i] = calc_params_mhz(current_clk_sys_hz, 100000000ULL);  
   }  

@@ -16,12 +16,13 @@
 //  - сканер clk_sys сохранён: подбирает шину под ЦЕЛЫЙ делитель LO и  
 //    сладкую зону NCO (логика П1..П6 исходника).  
 // ============================================================================  
-#include "vfo.h"  
+#include "vfo.h"
+#include "soft_rx.h"
 #include "soft_tx.h"              // PllConfig, pll_nominal, set_clk_sys, vsel_for  
 #include "../pins.h"  
 #include "../mem/mem_arena.h"  
 #include "hardware/pio.h"  
-#include "hardware/clocks.h"  
+#include "hardware/clocks.h"
   
 // ---- Параметры приёмного тракта ----------------------------------------  
 // СВЕРИТЬ с src/dsp/rx_dsp.h приёмника при миграции rx_dsp:  

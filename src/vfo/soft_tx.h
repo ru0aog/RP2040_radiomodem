@@ -1,135 +1,65 @@
 ﻿// src/vfo/soft_tx.h  
 // ============================================================================  
-// Программный DDS-генератор передачи (soft_tx): PIO-меандр на pio0 +  
-// кооперативный MASH-1-1 дизеринг делителя clkdiv + автотюн PLL clk_sys  
-// под частоту (сканер метрики спуров).  
-//  
-// Порт RP2040_beacon/vfo_hardware.cpp (GPLv3, RU0AOG) под архитектуру  
-// RP2040_radiomodem: дизеринг — кооперативный (soft_tx_poll() из loop1()  
-// в фазе TX), таблица тонов — из VfoBank менеджера vfo.cpp.  
-//  
-// Заголовок также экспортирует общие средства тактирования для  
-// soft_rx.cpp: PllConfig, pll_nominal, soft_tx_set_clk_sys(),  
-// soft_tx_vsel_for() — единый безопасный путь переключения clk_sys.  
+// Дизеринг-движок программного DDS VFO (передача): PIO-меандр на pio0 +  
+// кооперативный MASH-1-1 дизеринг clkdiv + автотюн PLL.  
+// Все частоты — Гц.  
 // ============================================================================  
 #pragma once  
 #include <Arduino.h>  
-#include "hardware/vreg.h"   // VREG_VOLTAGE_*  
+#include "vfo.h"  
+#include "hardware/vreg.h"  
   
-// ============================================================================  
-// ПАРАМЕТРЫ ТОНА (делитель PIO Q8.8 + DDS-шаг дробной коррекции)  
-// ============================================================================  
-// Заполняется calc_params() из VfoBank; хранится в RAM-секции  
-// .time_critical — доступ из горячего poll без обращения к флэшу.  
-struct SoftTxParams {  
-  uint32_t pio_int;          // целая часть делителя PIO (>= 2)  
-  uint32_t pio_frac;         // дробная часть Q0.8 [0..255]  
-  uint32_t dds_step;         // шаг остаточной DDS-коррекции Q0.32 (нечётный)  
-  uint32_t target_freq_chz;  // целевая частота тона, сантигерцы (Гц×0.1)  
-};  
+// ---------- Конфигурация PLL ----------  
+// vco = xosc/refdiv * fbdiv;  clk_sys = vco/(p1*p2).  
+// Имена/порядок полей — единый контракт с soft_rx.cpp и с инициализаторами  
+// pll_nominal/pll_overclock/pll_ceiling в soft_tx.cpp:  
+//   { fbdiv, p1, p2, clk_sys_hz, vsel, is_oc, refdiv }  
+typedef struct {  
+  uint32_t fbdiv;       // множитель VCO  
+  uint32_t p1, p2;      // post-делители  
+  uint32_t clk_sys_hz;  // итоговая частота шины, Гц  
+  uint32_t vsel;        // VREG_VOLTAGE_*  
+  bool     is_oc;       // true — конфигурация разгона (>133 МГц)  
+  uint32_t refdiv;      // делитель опоры PLL (обычно 1)  
+} PllConfig;  
   
-#define SOFT_TX_TONES  64     // совместимо с VFO_BANK_MAX_TONES менеджера  
+extern PllConfig pll_nominal;    // 133 МГц, дефолт  
+extern PllConfig pll_overclock;  // выбранный boost-конфиг  
+extern PllConfig pll_ceiling;    // верхняя граница для термогварда  
   
-// ============================================================================  
-// ПРОФИЛЬ ТАКТИРОВАНИЯ PLL (clk_sys)  
-// ============================================================================  
-// clk_sys = (XOSC / refdiv) × fbdiv / (p1 × p2).  
-// Один формат для всех профилей: номинал, boost, потолок OCTEST.  
-struct PllConfig {  
-  uint32_t fbdiv;        // умножитель VCO [16..320]  
-  uint32_t p1;           // пост-делитель 1 [2..7], >= p2  
-  uint32_t p2;           // пост-делитель 2 [1..7]  
-  uint64_t clk_sys_hz;   // итоговая частота шины  
-  uint32_t vsel;         // vreg_voltage для этой частоты  
-  bool     is_oc;        // true, если выше номинала 133 МГц  
-  uint32_t refdiv;       // делитель опоры [1..3]  
-};  
-  
-// Профиль номинальной шины 133 МГц — точка возврата из разгона и  
-// fallback при провале LOCK-проверки.  
-extern PllConfig pll_nominal;  
-  
-// Профиль последнего рассчитанного разгона (к нему возвращается  
-// термогвард после остывания) и доказанный потолок из OCTEST.  
-extern PllConfig pll_overclock;  
-extern PllConfig pll_ceiling;  
-  
-// Признак активного разгона и разрешение авто-буста.  
-extern volatile bool clk_boosted;  
-extern volatile bool vfo_auto_boost;  
-  
-// Лимиты из Flash-паспорта (OCTEST). До интеграции file_manager —  
-// паспортные дефолты, инициализируются в soft_tx.cpp.  
+// Пределы разгона (weak-дефолты в vfo.cpp, сильные здесь нет — только extern)  
 extern uint32_t vfo_max_clk_sys_hz;  
 extern uint32_t vfo_max_pll_vco_hz;  
   
-// ============================================================================  
-// ОБЩИЙ ПУТЬ ПЕРЕКЛЮЧЕНИЯ clk_sys (используют и TX, и RX-квадратура)  
-// ============================================================================  
-// Переключение под маской прерываний, в RAM (__not_in_flash_func):  
-// vreg → clk_sys на XOSC → pll_init → SSI BAUDR флэша → clk_sys на PLL →  
-// проверка frequency_count_khz (до 3 ретраев) → откат на номинал.  
-// Возвращает false при провале (уже откачено на pll_nominal).  
-bool     soft_tx_set_clk_sys(const PllConfig& cfg, uint32_t vsel);  
+// ---------- Параметры тона дизеринга ----------  
+// Число тонов в таблице — совпадает с банком менеджера.  
+#define SOFT_TX_TONES   16  
   
-// Подбор напряжения ядра под частоту шины (лестница исходника).  
-uint32_t soft_tx_vsel_for(uint64_t clk_hz);  
+// Таблица лежит в .time_critical — Core 1 читает каждый цикл без Flash.  
+struct SoftTxParams {  
+  uint32_t pio_int;         // целая часть делителя PIO (clkdiv int)  
+  uint32_t pio_frac;        // дробная часть 0..255  
+  uint32_t target_freq_chz; // целевая частота, сантигерцы (Hz*100)  
+  uint32_t dds_step;        // шаг DDS-дизеринга  
+  uint8_t  frac_mask;       // маска бит дизеринга (0..3)  
+};  
   
-// ============================================================================  
-// ЖИЗНЕННЫЙ ЦИКЛ ДВИЖКА (вызывается через VfoEngine менеджера)  
-// ============================================================================  
-// init: резерв SM на pio0, загрузка 2-тактовой программы меандра,  
-// пин из PIN_VFO_TX в output.  
-void     soft_tx_init(void);  
-  
-// start: автотюн PLL под freq_hz → пересчёт таблицы делителей из  
-// VfoBank → тон 0, сброс MASH → SM on.  
-void     soft_tx_start(uint32_t freq_hz);  
-  
-// stop: SM off, активный тон сброшен. Частота остаётся на последней  
-// (уход в паузу делает модулятор через vfo_tone(VFO_TONE_NONE) — но  
-// SM off надёжнее).  
-void     soft_tx_stop(void);  
-  
-// Мгновенная смена тона из банка: параметры в volatile-флаги,  
-// применяются на ближайшем тике soft_tx_poll(). Аккумуляторы MASH  
-// НЕ сбрасываются — фаза непрерывна, щелчка нет.  
-void     soft_tx_tone(uint8_t index);  
-  
-// Кооперативный дизеринг — дёргать каждую итерацию loop1() в фазе TX  
-// (через vfo_poll() менеджера). Одна итерация = одна запись clkdiv;  
-// флаги тона/сброса опрашиваются каждый 64-й вызов.  
-void     soft_tx_poll(void);  
-  
-// Фактическая частота активного тона, Гц (0 — SM остановлен / тишина).  
-uint32_t soft_tx_actual_hz(void);  
-  
-// ============================================================================  
-// РАЗГОН И ТЕРМОГВАРД  
-// ============================================================================  
-// Автотюн PLL под target_hz: скан метрики спуров → софт-тюн (только  
-// пересчёт таблицы, если текущий clk_sys не хуже) или переключение  
-// шины через soft_tx_set_clk_sys(). SM гасится на время переключения.  
-void     soft_tx_boost_enter(uint32_t target_hz);  
-  
-// Возврат на pll_nominal с пересчётом таблицы делителей.  
-void     soft_tx_boost_exit(void);  
-  
-// Периодический термогвард (вызывать из loop() на Core 0 через  
-// vfo_thermal_guard()): >80°C → откат на номинал, <60°C → возврат  
-// в pll_overclock. В RX-фазе температура не читается (ADC занят).  
-void     soft_tx_thermal_guard(void);  
-  
-// Текущая частота clk_sys по кэшу движка (обновляется set_clk_sys).  
+// ---------- PLL-хелперы (их же зовёт soft_rx) ----------  
+uint32_t soft_tx_vsel_for(uint64_t vco_hz);  
+bool     soft_tx_set_clk_sys(const PllConfig &cfg, uint32_t vsel);  
 uint32_t soft_tx_clk_sys_hz(void);  
   
-// Температура кристалла, °C; NAN в RX-фазе (ADC0/ADC1 заняты входом).  
-float    soft_tx_core_temp_c(void);  
+// ---------- Движок ----------  
+const VfoEngine *vfo_engine_soft_tx(void);  
+uint32_t soft_tx_actual_hz(void);  
   
-// ============================================================================  
-// УЗКОПОЛОСНЫЙ РЕЖИМ (Olivia и подобные)  
-// ============================================================================  
-// true → FRAC TPDF-дизер отключён (маска 0): тоны чище за счёт  
-// возможного сдвига спуров ближе к несущей. Применяется и к активному  
-// тону без перезапуска SM.  
-void     soft_tx_set_narrowband(bool on);
+// ---------- Разгон/термогвард ----------  
+void soft_tx_boost_enter(uint32_t target_hz);  
+void soft_tx_boost_exit(void);  
+void soft_tx_thermal_guard(void);  
+void soft_tx_set_narrowband(bool en);  
+  
+extern volatile bool clk_boosted;  
+  
+// ---------- Диагностика ----------  
+void soft_tx_debug(void);

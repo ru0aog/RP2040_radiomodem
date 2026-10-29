@@ -1,11 +1,12 @@
 ﻿// src/vfo/vfo.cpp  
 // ============================================================================  
-// Диспетчер VFO: банк тонов, выбор бэкенда по направлению, hook  
-// trx_control, разгон и термогвард. Аппаратная работа — в движках  
-// (soft_tx.cpp / soft_rx.cpp / si5351.cpp).  
+// Диспетчер VFO: банк тонов (Гц), выбор бэкенда, hook trx_control,  
+// разгон и термогвард. Аппаратура — в движках.  
 // ============================================================================  
 #include "vfo.h"  
-#include "soft_tx.h"        // boost/thermal/clk_sys прокси  
+#include "soft_rx.h"  
+#include "soft_tx.h"  
+#include "si5351.h"  
 #include "../mem/mem_arena.h"  
   
 // ---- Константы ----  
@@ -15,150 +16,103 @@
 // Коррекция опоры, ppb. Заполняется из Flash до vfo_init().  
 int32_t vfo_xosc_corr_ppb = VFO_XOSC_DEFAULT_PPB;  
   
-uint64_t vfo_xosc_hz(void) {  
-  int64_t hz = (int64_t)VFO_XOSC_NOMINAL_HZ +  
-               (int64_t)VFO_XOSC_NOMINAL_HZ * (int64_t)vfo_xosc_corr_ppb /  
-               1000000000LL;  
-  return (hz > 0) ? (uint64_t)hz : (uint64_t)VFO_XOSC_NOMINAL_HZ;  
-}  
+// Пределы разгона по умолчанию (если soft_tx их не переопределит).  
+// Паспорт OCTEST записывает сюда свои значения до vfo_init().  
+__attribute__((weak)) uint32_t vfo_max_clk_sys_hz = 150000000UL;  
+__attribute__((weak)) uint32_t vfo_max_pll_vco_hz = 1500000000ULL;  
   
-// ---- Состояние менеджера ----  
-static VfoBank          s_bank;  
-static const VfoEngine *s_eng_rx = nullptr;   // бэкенд направления RX  
-static const VfoEngine *s_eng_tx = nullptr;   // бэкенд направления TX  
-static const VfoEngine *s_active = nullptr;   // сейчас генерит  
-static volatile uint8_t s_tone   = VFO_TONE_NONE;  
+// Промежуточная частота приёмника — квад считает LO = f_rx − RX_IF.  
+#define RX_IF_SHIFT_HZ  11000UL  
   
-// ============================================================================  
-// ИНИЦИАЛИЗАЦИЯ  
-// ============================================================================  
-void vfo_init(void) {  
-  memset(&s_bank, 0, sizeof(s_bank));  
+// ---- Состояние ----  
+static VfoBank    s_bank;  
+static uint8_t    s_tone       = VFO_TONE_NONE;  
+static const VfoEngine *s_eng_tx = NULL;  
+static const VfoEngine *s_eng_rx = NULL;  
+static const VfoEngine *s_active = NULL;  
   
-  // Дефолтная привязка бэкендов.  
-  s_eng_rx = vfo_engine_soft_rx();  
-  s_eng_tx = vfo_engine_soft_tx();  
-  
-  // Движок внешнего синтезатора инициализируем тоже — он сам  
-  // детектирует наличие микросхемы на I2C и молчит, если её нет.  
-  const VfoEngine *si = vfo_engine_si5351();  
-  if (si && si->init) si->init();  
-  
-  if (s_eng_rx && s_eng_rx->init) s_eng_rx->init();  
-  if (s_eng_tx && s_eng_tx->init) s_eng_tx->init();  
-}  
-  
-void vfo_set_backend(TrxState dir, VfoBackend b) {  
-  const VfoEngine *e = nullptr;  
-  switch (b) {  
-    case VFO_BACKEND_SOFT_TX: e = vfo_engine_soft_tx(); break;  
-    case VFO_BACKEND_SOFT_RX: e = vfo_engine_soft_rx(); break;  
-    case VFO_BACKEND_SI5351:  e = vfo_engine_si5351();  break;  
-    default: break;  
-  }  
-  MEM_ASSERT(e != nullptr);  
-  if (dir == TRX_RX) s_eng_rx = e;  
-  else               s_eng_tx = e;  
-}  
+extern volatile bool clk_boosted;   // soft_tx.cpp  
   
 // ============================================================================  
-// БАНК ТОНОВ  
+// БАНК ТОНОВ (все частоты — uint32_t Гц)  
 // ============================================================================  
-void vfo_bank_set_grid(uint32_t base_hz, double step_hz, uint8_t count) {  
+void vfo_bank_set_grid(uint32_t base_hz, uint32_t step_hz, uint8_t count) {  
   MEM_ASSERT(count > 0 && count <= VFO_BANK_MAX_TONES);  
-  uint64_t base_mhz = (uint64_t)base_hz * 1000ULL;  
-  uint64_t step_mhz = (uint64_t)(step_hz * 1000.0);  
+  s_bank.base_hz = base_hz;  
+  s_bank.step_hz = step_hz;  
+  s_bank.count   = count;  
   for (uint8_t i = 0; i < count; i++)  
-    s_bank.freqs_mhz[i] = base_mhz + (uint64_t)i * step_mhz;  
-  s_bank.count = count;  
-  s_tone = VFO_TONE_NONE;  
+    s_bank.freqs_hz[i] = base_hz + (uint32_t)i * step_hz;  
   
-  // Пересчёт таблицы делителей — через рестарт активного бэкенда  
-  // на его текущей частоте (движок перечитывает vfo_bank()).  
-  if (s_active && s_active->start)  
-    s_active->start(s_active->actual_hz ? s_active->actual_hz() : base_hz);  
+  // Если генератор жив — перезапуск на базовой частоте сетки.  
+  // ВАЖНО: передаём base_hz, а НЕ vfo_actual_hz() — actual активного  
+  // движка это LO (f_rx − IF), а не частота настройки.  
+  if (s_active && s_active->start) s_active->start(base_hz);  
 }  
   
-void vfo_bank_set_list(const uint32_t *freqs_hz, uint8_t count) {  
-  MEM_ASSERT(freqs_hz && count > 0 && count <= VFO_BANK_MAX_TONES);  
-  for (uint8_t i = 0; i < count; i++)  
-    s_bank.freqs_mhz[i] = (uint64_t)freqs_hz[i] * 1000ULL;  
-  s_bank.count = count;  
-  s_tone = VFO_TONE_NONE;  
-}  
-  
-const VfoBank *vfo_bank(void) { return &s_bank; }  
-  
-// ============================================================================  
-// УПРАВЛЕНИЕ ТОНОМ  
-// ============================================================================  
 void vfo_tone(uint8_t index) {  
-  if (index != VFO_TONE_NONE) MEM_ASSERT(index < s_bank.count);  
+  MEM_ASSERT(index < s_bank.count || index == VFO_TONE_NONE);  
   s_tone = index;  
   if (s_active && s_active->tone) s_active->tone(index);  
 }  
   
 uint8_t vfo_tone_active(void) { return s_tone; }  
   
-// ============================================================================  
-// КВАДРАТУРНЫЙ LO (обёртки над RX-бэкендом)  
-// ============================================================================  
-uint32_t vfo_quad_start(uint32_t rx_freq_hz) {  
-  MEM_ASSERT(s_eng_rx != nullptr);  
-  s_active = s_eng_rx;  
-  if (s_eng_rx->start) s_eng_rx->start(rx_freq_hz);  
-  return s_eng_rx->actual_hz ? s_eng_rx->actual_hz() : 0;  
+const VfoBank *vfo_bank(void) { return &s_bank; }  
+  
+uint32_t vfo_bank_tone_hz(uint8_t index) {  
+  return (index < s_bank.count) ? s_bank.freqs_hz[index] : 0;  
 }  
   
-void vfo_quad_stop(void) {  
-  if (s_eng_rx && s_eng_rx->stop) s_eng_rx->stop();  
-  if (s_active == s_eng_rx) s_active = nullptr;  
-}  
-  
-uint32_t vfo_quad_lo_hz(void) {  
-  return (s_eng_rx && s_eng_rx->actual_hz) ? s_eng_rx->actual_hz() : 0;  
-}  
+uint32_t vfo_bank_step_hz(void) { return s_bank.step_hz; }  
   
 // ============================================================================  
-// РАЗГОН / ТЕРМОГВАРД — прокси в soft_tx  
+// ВЫБОР БЭКЕНДА  
 // ============================================================================  
-void vfo_boost_enter(uint32_t target_hz) {  
-  soft_tx_boost_enter(target_hz);  
+static const VfoEngine *vfo_backend(VfoBackendId b) {  
+  switch (b) {  
+    case VFO_BACKEND_SOFT_TX: return vfo_engine_soft_tx();  
+    case VFO_BACKEND_SOFT_RX: return vfo_engine_soft_rx();  
+    case VFO_BACKEND_SI5351:  return vfo_engine_si5351();  
+    default:                  return NULL;  
+  }  
 }  
   
-void vfo_boost_exit(void) {  
-  soft_tx_boost_exit();  
-}  
-  
-bool vfo_boosted(void) {  
-  return clk_boosted;   // из soft_tx.cpp  
-}  
-  
-void vfo_thermal_guard(void) {  
-  soft_tx_thermal_guard();  
+void vfo_set_backend(TrxState dir, VfoBackendId b) {  
+  const VfoEngine *e = vfo_backend(b);  
+  if (dir == TRX_TX) s_eng_tx = e;  
+  else               s_eng_rx = e;  
 }  
   
 // ============================================================================  
-// СЕРВИСНЫЙ ВЫЗОВ АКТИВНОГО БЭКЕНДА (из loop1())  
+// ИНИЦИАЛИЗАЦИЯ  
 // ============================================================================  
-void vfo_poll(void) {  
-  if (s_active && s_active->poll) s_active->poll();  
+void vfo_init(void) {  
+  // Движки сами резервируют PIO/SM/DMA при init().  
+  if (!s_eng_tx) vfo_set_backend(TRX_TX, VFO_BACKEND_SOFT_TX);  
+  if (!s_eng_rx) vfo_set_backend(TRX_RX, VFO_BACKEND_SOFT_RX);  
+  if (s_eng_tx && s_eng_tx->init) s_eng_tx->init();  
+  if (s_eng_rx && s_eng_rx->init) s_eng_rx->init();  
 }  
   
 // ============================================================================  
-// HOOK trx_control: смена направления  
+// HOOK trx_control — единственная точка смены активного генератора  
 // ============================================================================  
 void vfo_on_trx_switch(TrxState next, uint32_t freq_hz) {  
   // 1. Погасить текущий генератор (полудуплекс — активен один).  
   if (s_active && s_active->stop) s_active->stop();  
-  s_active = nullptr;  
+  s_active = NULL;  
   s_tone   = VFO_TONE_NONE;  
   
-  // 2. Разгон актуален только для передачи: в RX — откат на номинал.  
+  // 2. Разгон актуален только для TX: при RX — откат к номиналу.  
   if (next == TRX_RX && clk_boosted) soft_tx_boost_exit();  
   
-  // 3. Запустить бэкенд нового направления.  
+  // 3. Запустить движок нового направления.  
   const VfoEngine *e = (next == TRX_TX) ? s_eng_tx : s_eng_rx;  
+  Serial.printf("[VFO] switch -> %s eng=%s\n",  
+                next == TRX_TX ? "TX" : "RX",  
+                e == s_eng_tx ? "soft_tx" :  
+                e == s_eng_rx ? "soft_rx" : "none");  
   if (e && e->start) {  
     s_active = e;  
     e->start(freq_hz);  
@@ -166,10 +120,51 @@ void vfo_on_trx_switch(TrxState next, uint32_t freq_hz) {
 }  
   
 // ============================================================================  
+// СЕРВИС — из loop1() (дизеринг MASH в soft_tx)  
+// ============================================================================  
+void vfo_poll(void) {  
+  if (s_active && s_active->poll) s_active->poll();  
+}  
+  
+// ============================================================================  
+// РАЗГОН / ТЕРМОГВАРД — прокси к soft_tx  
+// ============================================================================  
+void vfo_boost_enter(uint32_t target_hz) {  
+  if (s_active == s_eng_tx) soft_tx_boost_enter(target_hz);  
+}  
+  
+void vfo_thermal_guard(void) { soft_tx_thermal_guard(); }  
+  
+uint64_t vfo_xosc_hz(void) {  
+  // Скорректированная опора: xosc * (1 + ppb*1e-9).  
+  int64_t hz = (int64_t)VFO_XOSC_NOMINAL_HZ;  
+  hz += (hz * (int64_t)vfo_xosc_corr_ppb) / 1000000000LL;  
+  return (uint64_t)hz;  
+}  
+  
+// ============================================================================  
+// КВАДРАТУРНЫЙ LO (низкоуровневый API для тестов; нормальный путь — через  
+// trx_switch/vfo_on_trx_switch)  
+// ============================================================================  
+void vfo_quad_start(uint32_t rx_freq_hz) {  
+  if (s_eng_rx && s_eng_rx->start) s_eng_rx->start(rx_freq_hz);  
+}  
+  
+void vfo_quad_stop(void) {  
+  if (s_eng_rx && s_eng_rx->stop) s_eng_rx->stop();  
+}  
+  
+uint32_t vfo_quad_lo_hz(void) {  
+  return (s_eng_rx && s_eng_rx->actual_hz) ? s_eng_rx->actual_hz() : 0;  
+}  
+  
+// ============================================================================  
 // ДИАГНОСТИКА  
 // ============================================================================  
-uint32_t vfo_clk_sys_hz(void) {  
-  return soft_tx_clk_sys_hz();  
+uint32_t vfo_clk_sys_hz(void) { return soft_tx_clk_sys_hz(); }  
+  
+uint32_t vfo_actual_hz(void) {  
+  return (s_active && s_active->actual_hz) ? s_active->actual_hz() : 0;  
 }  
   
 void vfo_debug_dump(void) {  
