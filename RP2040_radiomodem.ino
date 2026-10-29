@@ -21,8 +21,8 @@
 #include "src/rx/rx_dsp.h"        // rx_dsp_init/rx_dsp_poll — КАРКАС  
 #include "src/rx/rx_decoders.h"   // rx_decoders_init/poll — КАРКАС  
 #include "src/rsid/rsid.h"        // rsid_init/poll — КАРКАС  
-#include "src/usb/usb_audio.h"    // usb_audio_init/poll — КАРКАС  
 #include "src/modem/modem.h"      // modem_init/poll — КАРКАС
+#include "src/rx/rx_usb_audio.h"
 #include <Adafruit_TinyUSB.h>
   
 // ============================================================================  
