@@ -1,4 +1,4 @@
-// src/modes/ax25/ax25.h  
+﻿// src/modes/ax25/ax25.h  
 // ============================================================================  
 // AX.25 300 bd: AFSK + NRZI + HDLC UI-фреймы. Общий API обеих сторон.  
 // Разнос тонов ±100 Гц вокруг центра (адаптация RU0AOG для HF, НЕ Bell 202).  
@@ -11,7 +11,7 @@
 uint16_t ax25_fcs(const uint8_t *data, size_t len);   // CRC-16/X.25  
   
 // ---------- TX ----------  
-bool ax25_tx_frame(const uint8_t *payload, size_t len);  
+uint32_t ax25_tx_frame(const uint8_t *payload, uint16_t len);  // -> длительность, мс
 bool ax25_tx_busy(void);        // идёт посылка  
   
 // ---------- RX ----------  
