@@ -2,7 +2,7 @@
 // ============================================================================  
 // Захват ADC+DMA: ADC0=I (GP26), ADC1=Q (GP27), round-robin, 16-бит переносы  
 // в 32-бит слова [15:0]=I, [31:16]=Q. Пинг-понг двух DMA-каналов через  
-// chain_to; DMA IRQ0 на Core 0 публикует блоки в SPSC-очередь для Core 1.  
+// chain_to; DMA IRQ0 на Core 1 публикует блоки в SPSC-очередь для Core 1.  
 // Порт из RP2040_receiver/src/dsp/rx_capture.cpp. Буферы статические  
 // (DSP-путь не проходит через mem_arena — он живёт до mem_arena_switch,  
 // а пул сбрасывается при trx_switch).  
@@ -50,7 +50,7 @@ static volatile uint32_t __attribute__((aligned(4))) rx_scratch_a[RX_BLOCK_SAMPL
 static volatile uint32_t __attribute__((aligned(4))) rx_scratch_b[RX_BLOCK_SAMPLES];  
   
 // ---------------------------------------------------------------------------  
-// SPSC-очередь завершённых блоков: пишет IRQ (Core 0), читает DSP (Core 1)  
+// SPSC-очередь завершённых блоков: пишет IRQ и читает DSP — оба на Core 1 
 // ---------------------------------------------------------------------------  
 static const volatile uint32_t* rx_queue[RX_QUEUE_DEPTH];  
 static volatile uint8_t rx_q_head = 0;  
@@ -183,7 +183,7 @@ static void __not_in_flash_func(rx_handle_completed_channel)(
 }  
   
 // ---------------------------------------------------------------------------  
-// ISR DMA_IRQ_0 (Core 0)  
+// ISR DMA_IRQ_0 (Core 1)  
 // ---------------------------------------------------------------------------  
 static void __not_in_flash_func(rx_dma_irq)(void) {  
     ++rx_cap_isr_count;  
@@ -199,7 +199,10 @@ static void __not_in_flash_func(rx_dma_irq)(void) {
 // ---------------------------------------------------------------------------  
 // Запуск захвата (после rx_dsp_start — NCO уже настроен)  
 // ---------------------------------------------------------------------------  
-void rx_capture_start(void) {  
+void rx_capture_start(void) {
+    // DMA_IRQ_0 должен жить на Core 1 (там же DSP-поллинг очереди).  
+    assert(get_core_num() == 1);
+    
     if (rx_running) return;  
   
     rx_q_head = 0;  
