@@ -8,8 +8,10 @@
 #include "si5351.h"
 #include "quad_vfo/quad_vfo.h"     // вендорная копия ru0aog/quad_vfo  
 #include "../pins.h"              // PIN_QUAD_I  
-#include "../mem/mem_arena.h"  
-  
+#include "../mem/mem_arena.h"
+
+#include "hardware/clocks.h"
+
 // ---- Константы ----  
 #define VFO_XOSC_NOMINAL_HZ   12000000ULL  
 #define VFO_XOSC_DEFAULT_PPB  (+25000LL)  
@@ -21,9 +23,6 @@ int32_t vfo_xosc_corr_ppb = VFO_XOSC_DEFAULT_PPB;
 // Паспорт OCTEST записывает сюда свои значения до vfo_init().  
 __attribute__((weak)) uint32_t vfo_max_clk_sys_hz = 150000000UL;  
 __attribute__((weak)) uint32_t vfo_max_pll_vco_hz = 1500000000ULL;  
-  
-// Промежуточная частота приёмника — квад считает LO = f_rx − RX_IF.  
-#define RX_IF_SHIFT_HZ  11000UL  
   
 // ---- Состояние ----  
 static VfoBank    s_bank;  
@@ -227,7 +226,11 @@ void vfo_quad_debug(void) { quad_vfo_debug(); }
 // ============================================================================  
 // ДИАГНОСТИКА  
 // ============================================================================  
-uint32_t vfo_clk_sys_hz(void) { return soft_tx_clk_sys_hz(); }  
+uint32_t vfo_clk_sys_hz(void) {  
+  // Фактическая шина: после quad_vfo_start() clk_sys может быть  
+  // перепрошит под LO (напр. 337.5 МГц), кэш soft_tx врёт.  
+  return (uint32_t)clock_get_hz(clk_sys);  
+}
   
 uint32_t vfo_actual_hz(void) {  
   return (s_active && s_active->actual_hz) ? s_active->actual_hz() : 0;  

@@ -8,7 +8,7 @@
 // ============================================================================  
 #pragma once  
 #include <Arduino.h>  
-#include "../trx/trx_control.h"  
+#include "../trx/trx_control.h"
   
 // ---------- Типы ----------  
 typedef enum {  
