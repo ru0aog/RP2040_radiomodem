@@ -41,7 +41,6 @@ typedef struct VfoEngine {
 } VfoEngine;  
   
 const VfoEngine *vfo_engine_soft_tx(void);  
-const VfoEngine *vfo_engine_soft_rx(void);  
 const VfoEngine *vfo_engine_si5351(void);  
   
 // ---------- Инициализация ----------  
@@ -78,7 +77,8 @@ void     vfo_debug_dump(void);
 void     vfo_quad_start(uint32_t rx_freq_hz);  
 void     vfo_quad_stop(void);  
 uint32_t vfo_quad_lo_hz(void);  
-  
+void     vfo_quad_debug(void);   // дамп clk_sys/PLL/LO/err из quad_vfo
+
 // ---------- Пределы разгона (паспорт стабильности, из OCTEST/SET.TXT) ----------  
 extern uint32_t vfo_max_clk_sys_hz;  
 extern uint32_t vfo_max_pll_vco_hz;
