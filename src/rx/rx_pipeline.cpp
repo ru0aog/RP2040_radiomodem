@@ -2,7 +2,6 @@
 #include <Arduino.h>  
 #include "rx_dsp.h"  
 #include "rx_capture.h"  
-#include "../vfo/soft_rx.h"          // vfo_quad_lo_hz()  
   
 static uint32_t s_freq_hz = 0;        // последняя рабочая частота RX  
   

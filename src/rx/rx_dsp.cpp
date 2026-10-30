@@ -15,8 +15,8 @@
   
 #include "rx_dsp.h"  
 #include "rx_capture.h"  
-#include "../vfo/soft_rx.h"   // vfo_quad_lo_hz()  
 #include "../rsid/rsid.h"
+#include "../vfo/vfo.h"          // vfo_quad_lo_hz()
   
 // ---- Параметры тракта ----  
 #define RX_FS_IN_HZ     (RX_ADC_SAMPLE_RATE_HZ / 2.0f)  // 125 ksps/канал  
