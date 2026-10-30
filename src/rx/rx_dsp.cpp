@@ -642,9 +642,9 @@ void rx_dsp_start(uint32_t freq_hz) {
     nco_step = (uint32_t)(int64_t)step;  
     nco_phase = 0;  
   
-    Serial.printf("[RX] start f=%lu lo=%lu f_nco=%.1f step=0x%08lX\n",  
-                  (unsigned long)freq_hz, (unsigned long)lo_hz,  
-                  (double)f_nco, (unsigned long)nco_step);  
+    Serial.printf("[RX] start f=%lu lo=%lu f_nco=%ld step=0x%08lX\n",  
+              (unsigned long)freq_hz, (unsigned long)lo_hz,  
+              (long)f_nco, (unsigned long)nco_step);
 }  
   
 // Останов тракта (Core 0). Должен предшествовать rx_capture_stop().  
