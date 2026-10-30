@@ -1,4 +1,4 @@
-// RP2040_radiomodem.ino  
+// RP2040_radiomodem.cpp
 // ============================================================================  
 // Полудуплексный цифровой радиомодем на RP2040.  
 //  
@@ -15,7 +15,7 @@
 #include "src/pins.h"  
 #include "src/trx/trx_control.h"  
 #include "src/vfo/vfo.h"  
-#include "src/vfo/soft_rx.h"      // soft_rx_quad_debug() — разовая диагностика  
+
 #include "src/mem/mem_arena.h"  
 #include "src/rx/rx_capture.h"    // rx_capture_start() — КАРКАС  
 #include "src/rx/rx_dsp.h"        // rx_dsp_init/rx_dsp_poll — КАРКАС  
@@ -126,7 +126,7 @@ void setup1() {
   // до первого trx_switch.  
   vfo_on_trx_switch(TRX_RX, 14074000);  
   delay(100);                       // пересинхронизация USB CDC + старт SM  
-  soft_rx_quad_debug();             // [LODBG] clkdiv/enabled/lo_hz
+  vfo_quad_debug();             // [LODBG] clkdiv/enabled/lo_hz
 
   rx_dsp_start(14074000);           // NCO = f_rx - vfo_quad_lo_hz()  
   rx_capture_start();               // DMA запускаем ПОСЛЕ настройки NCO
