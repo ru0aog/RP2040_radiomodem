@@ -3,7 +3,7 @@
 static const ModeIface s_iface = {  
     .id        = MODE_OLIVIA,  
     .name      = "olivia",  
-    .rsid_code = 38,          // проверить по RSID_LIST в rsid.cpp!  
+    .rsid_code = 69,              // fldigi RSID: OLIVIA-8/250  
     .rx_init   = olivia_rx_init,  
     .rx_push   = olivia_rx_push,  
     .tx_frame  = 0,  
