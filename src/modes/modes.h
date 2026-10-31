@@ -13,6 +13,7 @@ typedef enum {
   MODE_AX25,  
   MODE_CW,  
   MODE_RTTY,  
+  MODE_OLIVIA,  
   MODE_COUNT  
 } ModeId;
   
