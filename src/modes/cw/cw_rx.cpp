@@ -235,3 +235,19 @@ void cw_rx_push(int16_t x) {
         osc_re *= g; osc_im *= g;  
     }  
 }
+
+// Останов при смене моды: флаш незавершённого символа + сброс  
+// состояния в исходное (тайминги вернутся на CW_DEFAULT_WPM).  
+void cw_rx_stop(void) {  
+    if (!cw_active) return;  
+    if (rx_state != RS_IDLE && code > 1) {  
+        emit_char();                        // добить последнюю букву  
+        if (!space_sent) Serial.write(' '); // закрыть слово  
+    }  
+    cw_active = false;  
+    cw_reset_timing((float)CW_DEFAULT_WPM);  
+    sig_avg = 0.0f; noise_floor = 0.0f; agc_peak = 1.0f;  
+    win_cnt = 0; win_acc = 0.0f;  
+    lp_re = lp_im = 0.0f;  
+    osc_re = 1.0f; osc_im = 0.0f;  
+}
