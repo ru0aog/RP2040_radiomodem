@@ -9,8 +9,11 @@
 typedef enum {  
   RX_MODE_NONE = 0,  
   RX_MODE_AX25,  
-  // RX_MODE_RTTY, RX_MODE_FT8, ... — расширяется при порте мод  
-} RxModeId;  
+  RX_MODE_CW,  
+  RX_MODE_RTTY,  
+  RX_MODE_OLIVIA,  
+  // RX_MODE_FT8, ... — расширяется при порте мод  
+} RxModeId;
   
 void     rx_decoders_init(void);  
 void     rx_decoders_poll(void);              // вызов из loop() на Core 0  
