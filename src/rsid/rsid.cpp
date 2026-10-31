@@ -69,10 +69,10 @@ static const RSIDmap rsid_ids_1[] = { RSID_LIST };
 static const int rsid_ids_size1 =  
     (int)(sizeof(rsid_ids_1) / sizeof(rsid_ids_1[0])) - 1;  
   
-#define RSID_LIST2 \  
-    ELEM2_(1171, "IFKP")  \  
-    ELEM2_(1172, "JTTY")  \  
-    ELEM2_(0,    "NONE2")  
+#define RSID_LIST2 \
+    ELEM2_(1171, "IFKP")  \
+    ELEM2_(1172, "JTTY")  \
+    ELEM2_(0,    "NONE2")
   
 #define ELEM2_(code_, name_) { code_, name_ },  
 static const RSIDmap rsid_ids_2[] = { RSID_LIST2 };  
