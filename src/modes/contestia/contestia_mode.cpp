@@ -3,7 +3,7 @@
 static const ModeIface s_iface = {  
     .id        = MODE_CONTESTIA,  
     .name      = "contestia",  
-    .rsid_code = 112,          // fldigi RSID: Contestia-8/250 — СВЕРИТЬ с RSID_LIST  
+    .rsid_code = 49,   // fldigi RSID: CONTESTIA-8/250
     .rx_init   = contestia_rx_init,  
     .rx_push   = contestia_rx_push,  
     .tx_frame  = 0,  
