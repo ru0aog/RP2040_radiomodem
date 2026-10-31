@@ -103,6 +103,3 @@ void rx_decoders_poll(void) {
 }
 
 void rx_decoders_emit(uint8_t c) { Serial.write(c); }  
-  
-uint32_t rx_decoders_blocks(void)  { return dec_blocks; }  
-uint32_t rx_decoders_drained(void) { return dec_drained; }
