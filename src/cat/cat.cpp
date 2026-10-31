@@ -129,9 +129,11 @@ static void cat_execute(const char* cmd) {
   
 void cat_init(void) {  
     // Транспорт — основной Serial (уже открыт в setup()).  
-    s_rx_hz = 0;  
-    s_line[0] = 0;  
-    s_len = 0;  
+    cat_enabled = true;              // без этого cat_poll() мёртв  
+    cat_buf[0] = 0;  
+    cat_len = 0;  
+    // s_rx_hz НЕ обнулять — держит стартовое 14074000,  
+    // cat_set_freq_hz() из setup1() его синхронизирует.  
     Serial.println("[CAT] init: shared CDC port");  
 }
   
