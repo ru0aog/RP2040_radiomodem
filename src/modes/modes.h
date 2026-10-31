@@ -8,13 +8,14 @@
 #include <Arduino.h>  
   
 // Уникальный ID моды; совпадает с RSID-кодом там, где он стандартизован.  
-typedef enum {  
-  MODE_NONE = 0,  
-  MODE_AX25,  
-  MODE_CW,  
-  MODE_RTTY,  
-  MODE_OLIVIA,  
-  MODE_COUNT  
+typedef enum {
+  MODE_NONE = 0,
+  MODE_AX25,
+  MODE_CW,
+  MODE_RTTY,
+  MODE_OLIVIA,
+  MODE_CONTESTIA,
+  MODE_COUNT
 } ModeId;
   
 struct ModeIface {  

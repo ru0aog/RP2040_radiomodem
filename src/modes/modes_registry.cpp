@@ -4,12 +4,14 @@
 #include "cw/cw.h"          // cw_mode_iface()  
 #include "rtty/rtty.h"      // rtty_mode_iface()
 #include "olivia/olivia.h"
+#include "contestia/contestia.h"
   
 static const ModeIface* const modes_table[] = {  
     ax25_mode_iface(),  
     cw_mode_iface(),  
     rtty_mode_iface(),  
     olivia_mode_iface(),  
+    contestia_mode_iface(),  
 };
   
 #define MODES_N (sizeof(modes_table) / sizeof(modes_table[0]))  
