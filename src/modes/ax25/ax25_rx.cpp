@@ -86,9 +86,9 @@ static void ax25_frame_done(bool ok) {
                 src[i] = (char)(g_frame[7+i] >> 1);  
             }  
             dst[6] = 0; src[6] = 0;  
-            for (char c : std::string_view(dst)) if (c) emit(c);  
-            emit('>');  
-            for (char c : std::string_view(src)) if (c) emit(c);  
+            for (const char *p = dst; *p; p++) rx_decoders_emit((uint8_t)*p);  
+            rx_decoders_emit('>');  
+            for (const char *p = src; *p; p++) rx_decoders_emit((uint8_t)*p);
             emit(':');  
             // info: после адресного поля (14 байт) + ctrl + pid  
             uint16_t info_off = 16;  
