@@ -10,7 +10,10 @@
 #include <string.h>  
 #include <stdlib.h>  
   
-Adafruit_USBD_CDC CatSerial(1);          // второй CDC-интерфейс  
+// CAT на основном USB-CDC (Serial) — тот же порт, что и логи.  
+// Ответы CAT перемешиваются с логами; для WSJT-X это допустимо  
+// (Hamlib фильтрует по ожидаемым ответам), но монитор порта будет  
+// показывать и то, и другое.
   
 static bool     cat_enabled = false;  
 static uint32_t s_rx_hz     = 14074000;  // зеркало частоты приёма  
@@ -23,8 +26,8 @@ static bool    cat_prev_dtr = false;
 static char cat_mode = '2';              // 1=LSB 2=USB 3=CW 4=FM 5=AM  
   
 static void cat_send(const char* s) {  
-    CatSerial.write((const uint8_t*)s, strlen(s));  
-    CatSerial.flush();  
+    Serial.write((const uint8_t*)s, strlen(s));  
+    Serial.flush();  
 }  
   
 static void cat_reply_fa(void) {  
@@ -125,19 +128,20 @@ static void cat_execute(const char* cmd) {
 }  
   
 void cat_init(void) {  
-    CatSerial.setStringDescriptor("Radiomodem CAT");  
-    CatSerial.begin(115200);  
-    cat_enabled = (Adafruit_USBD_CDC::getInstanceCount() >= 2);  
-    cat_len = 0;  
-}  
+    // Транспорт — основной Serial (уже открыт в setup()).  
+    s_rx_hz = 0;  
+    s_line[0] = 0;  
+    s_len = 0;  
+    Serial.println("[CAT] init: shared CDC port");  
+}
   
 void cat_poll(void) {  
     if (!cat_enabled) return;  
-    bool dtr = CatSerial.dtr();  
-    if (!cat_prev_dtr && dtr) { while (CatSerial.available() > 0) CatSerial.read(); cat_len = 0; }  
+    bool dtr = Serial.dtr();  
+    if (!cat_prev_dtr && dtr) { while (Serial.available() > 0) Serial.read(); cat_len = 0; }  
     cat_prev_dtr = dtr;  
-    while (CatSerial.available() > 0) {  
-        char c = (char)CatSerial.read();  
+    while (Serial.available() > 0) {  
+        char c = (char)Serial.read();  
         if (c == ';') { cat_buf[cat_len] = '\0'; cat_execute(cat_buf); cat_len = 0; }  
         else if (c != '\r' && c != '\n') {  
             if (cat_len < CAT_BUF_MAX-1) cat_buf[cat_len++] = c; else cat_len = 0;  
