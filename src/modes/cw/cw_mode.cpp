@@ -4,7 +4,7 @@
 static const ModeIface s_mode = {  
   .id          = MODE_CW,  
   .name        = "cw",  
-  .rsid_code   = 0,              // TODO: RSID-код CW (7?) при интеграции RSID  
+  .rsid_code   = 26,             // RSID "CW" — из RSID_LIST rsid.cpp
   .rx_init     = cw_rx_init,  
   .rx_push     = cw_rx_push,  
   .tx_frame    = cw_tx_frame,  
