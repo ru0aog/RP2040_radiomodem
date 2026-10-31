@@ -11,7 +11,8 @@
 typedef enum {  
   MODE_NONE = 0,  
   MODE_AX25,  
-  MODE_CW,        // NEW  
+  MODE_CW,  
+  MODE_RTTY,  
   MODE_COUNT  
 } ModeId;
   
