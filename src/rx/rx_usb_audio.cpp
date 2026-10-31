@@ -15,12 +15,6 @@
 #include "AudioTools.h"  
 #include "AudioTools/Communication/USB/USBAudioStream.h"  
   
-// ---- Демодулятор (режимы rx_dsp) ----  
-#define DEMOD_USB  0  
-#define DEMOD_LSB  1  
-#define DEMOD_AM   2  
-#define DEMOD_FM   3  
-  
 // Фиксированное усиление сырых I/Q перед упаковкой в PCM.  
 #define RAW_IQ_GAIN 16  
   

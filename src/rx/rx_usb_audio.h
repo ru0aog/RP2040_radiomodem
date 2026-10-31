@@ -22,8 +22,11 @@ void     rx_usb_audio_set_mode(uint8_t mode);   // UAC_MODE_*
 uint8_t  rx_usb_audio_get_mode(void);  
   
 // ---- Выбор демодулятора для UAC_MODE_SSB ----  
-// Значения: DEMOD_USB/DEMOD_LSB/DEMOD_AM/DEMOD_FM (rx_usb_audio.cpp),  
-// транслируются в RXD_DEMOD_* из rx_dsp.h.  
+// Коды транслируются в RXD_DEMOD_* внутри rx_usb_audio.cpp.  
+#define DEMOD_USB  0  
+#define DEMOD_LSB  1  
+#define DEMOD_AM   2  
+#define DEMOD_FM   3  
 void     rx_usb_audio_set_demod(uint8_t demod);  
 uint8_t  rx_usb_audio_get_demod(void);  
   
