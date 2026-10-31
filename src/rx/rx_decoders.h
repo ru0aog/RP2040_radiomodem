@@ -17,3 +17,6 @@ void     rx_decoders_poll(void);              // вызов из loop() на Cor
 void     rx_decoders_set_mode(RxModeId id);   // ручной выбор  
 RxModeId rx_decoders_mode(void);  
 void     rx_decoders_on_rsid(uint16_t code);  // колбэк от RSID → автодетект
+void     rx_decoders_emit(uint8_t c);         // вывод декодированного байта (Serial)  
+uint32_t rx_decoders_blocks(void);            // статистика: принято блоков  
+uint32_t rx_decoders_drained(void);           // статистика: дренировано без моды

@@ -29,7 +29,9 @@ void rx_decoders_init(void) {
 // Ручной выбор моды (без RSID): центр неизвестен — моды  
 // подставляют дефолт (ax25: 1500 Гц при center_hz==0).  
 void rx_decoders_set_mode(RxModeId id) {  
-    const ModeIface* m = modes_get_by_id(id);  
+    // RxModeId → ModeId: явный маппинг, значения enum'ов не совпадают по контракту  
+    ModeId mid = (id == RX_MODE_AX25) ? MODE_AX25 : MODE_NONE;  
+    const ModeIface* m = modes_get(mid);
     if (!m) {  
         Serial.printf("[DEC] mode id=%u не найдена\n", (unsigned)id);  
         return;  
@@ -99,3 +101,8 @@ void rx_decoders_poll(void) {
         ++dec_drained;  
     }  
 }
+
+void rx_decoders_emit(uint8_t c) { Serial.write(c); }  
+  
+uint32_t rx_decoders_blocks(void)  { return dec_blocks; }  
+uint32_t rx_decoders_drained(void) { return dec_drained; }
