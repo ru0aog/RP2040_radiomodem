@@ -34,10 +34,11 @@
 volatile bool core0_ready = false;  
   
 void setup() {  
-  cat_init();                     // второй CDC должен быть в дескрипторах до энумерации  
   Serial.begin(115200);  
  
   while (!Serial && millis() < 5000) delay(1);
+
+  cat_init();                        // CAT на этом же порту
 
   Serial.println();  
   Serial.println("RP2040_radiomodem — полудуплексный цифровой радиомодем");  
