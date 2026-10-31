@@ -1,10 +1,11 @@
-// CAT-интерфейс модема (Kenwood TS-2000 subset), второй USB-CDC порт.  
+// CAT-интерфейс модема (Kenwood TS-2000 subset)
 // Порт из RP2040_receiver/src/cat/fldigi_cat.cpp; retune через vfo_on_trx_switch.  
 #include "cat.h"  
 #include "../vfo/vfo.h"  
 #include "../trx/trx_control.h"  
 #include "../rx/rx_dsp.h"  
-#include "../rx/rx_usb_audio.h"  
+#include "../rx/rx_usb_audio.h"
+#include "../vfo/quad_vfo/quad_vfo.h"   // quad_vfo_set_quiet
 #include <Adafruit_TinyUSB.h>  
 #include <stdio.h>  
 #include <string.h>  
@@ -17,7 +18,8 @@
   
 static bool     cat_enabled = false;  
 static uint32_t s_rx_hz     = 14074000;  // зеркало частоты приёма  
-  
+static uint32_t s_last_retune_ms = 0;
+
 #define CAT_BUF_MAX 64  
 static char    cat_buf[CAT_BUF_MAX];  
 static uint8_t cat_len = 0;  
@@ -26,9 +28,10 @@ static bool    cat_prev_dtr = false;
 static char cat_mode = '2';              // 1=LSB 2=USB 3=CW 4=FM 5=AM  
   
 static void cat_send(const char* s) {  
+    if (!Serial.dtr()) return;           // хост ушёл — не писать в пустоту  
     Serial.write((const uint8_t*)s, strlen(s));  
     Serial.flush();  
-}  
+}
   
 static void cat_reply_fa(void) {  
     char out[16];  
@@ -54,10 +57,17 @@ static const uint16_t SL_TABLE[12] = {0,50,100,200,300,400,500,600,700,800,900,1
 static const uint16_t SH_TABLE[12] = {1400,1600,1800,2000,2200,2400,2600,2800,3000,3400,4000,5000};  
   
 static void cat_retune(uint32_t hz) {  
+    if (hz == s_rx_hz) { cat_reply_fa(); return; }  // та же частота — без перезахвата  
     s_rx_hz = hz;  
-    vfo_on_trx_switch(TRX_RX, hz);   // новый quad_vfo_start + захват PLL  
-    rx_dsp_start(hz);                // пересчёт NCO от vfo_quad_lo_hz()  
-}  
+    quad_vfo_set_quiet(true);          // глушим [QUAD]/[PLL] логи сканера  
+    vfo_on_trx_switch(TRX_RX, hz);  
+    quad_vfo_set_quiet(false);  
+    rx_dsp_start(hz);  
+    cat_reply_fa();                    // echo ответа (Hamlib ждёт)  
+    // Выбросить накопившийся ввод: хост мог слать повторы во время перестройки  
+    while (Serial.available() > 0) { Serial.read(); }  
+    cat_len = 0;  
+}
   
 static void cat_execute(const char* cmd) {  
     size_t n = strlen(cmd);  
@@ -65,7 +75,16 @@ static void cat_execute(const char* cmd) {
   
     if (cmd[0]=='F' && cmd[1]=='A') {  
         if (n == 2) { cat_reply_fa(); }  
-        else if (n == 13) { cat_retune((uint32_t)strtoul(cmd+2, nullptr, 10)); }  
+        else if (n == 13) {  
+            uint32_t now = millis();  
+            if (now - s_last_retune_ms < 200) {          // макс. 5 перестроек/сек  
+                s_rx_hz = (uint32_t)strtoul(cmd+2, nullptr, 10);  // зеркало обновим  
+                cat_reply_fa();                           // но железо не трогаем  
+                return;  
+            }  
+            s_last_retune_ms = now;  
+            cat_retune((uint32_t)strtoul(cmd+2, nullptr, 10));  
+        }
         else cat_reply_err();  
         return;  
     }  
