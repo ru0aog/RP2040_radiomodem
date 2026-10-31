@@ -53,15 +53,15 @@
 // ============================================================================  
 struct RSIDmap { unsigned short rs; const char* name; };  
   
-#define RSID_LIST \  
-    ELEM_(263, "EOT")            ELEM_(6,   "ESCAPE")        \  
-    ELEM_(26,  "CW")                                         \  
-    ELEM_(39,  "RTTY-45")        ELEM_(40, "RTTY-50")        \  
-    ELEM_(49,  "CONT-8/250")                                 \  
-    ELEM_(69,  "OLIVIA-8/250")   ELEM_(70, "AX25")           \  
-    ELEM_(86, "DOMEX8")          ELEM_(137,"THOR8")          \  
-    ELEM_(143,"THOR11")          ELEM_(57, "MFSK16")         \  
-    ELEM_(0,   "NONE")  
+#define RSID_LIST \
+    ELEM_(263, "EOT")            ELEM_(6,   "ESCAPE")        \
+    ELEM_(26,  "CW")                                         \
+    ELEM_(39,  "RTTY-45")        ELEM_(40, "RTTY-50")        \
+    ELEM_(49,  "CONT-8/250")                                 \
+    ELEM_(69,  "OLIVIA-8/250")   ELEM_(70, "AX25")           \
+    ELEM_(86, "DOMEX8")          ELEM_(137,"THOR8")          \
+    ELEM_(143,"THOR11")          ELEM_(57, "MFSK16")         \
+    ELEM_(0,   "NONE")
   
 #define ELEM_(code_, name_) { code_, name_ },  
 static const RSIDmap rsid_ids_1[] = { RSID_LIST };  
@@ -360,10 +360,10 @@ void rsid_poll(void) {
     if (!rsid_det_pending) return;  
     rsid_det_pending = false;  
     __dmb();  
-    Serial.printf("# RSID mode=%s code=%d freq=%.1f\n",  
-                  rsid_det_result.mode_name,  
-                  rsid_det_result.mode_code,  
-                  rsid_det_result.freq_hz);  
+    Serial.printf("# RSID mode=%s code=%d freq=%ld\n",  
+              rsid_det_result.mode_name,  
+              rsid_det_result.mode_code,  
+              (long)(rsid_det_result.freq_hz + 0.5f)); 
     rx_decoders_on_rsid((uint16_t)rsid_det_result.mode_code);  
 }  
   
@@ -582,4 +582,8 @@ void __not_in_flash_func(rsid_rx_service_sliced)(void) {
     } while ((uint32_t)(micros() - t_slice_start) < RSID_SLICE_BUDGET_US);  
   
     rsid_service_record_time(t_service_start);  
+}
+
+uint32_t rsid_last_freq_hz(void) {  
+    return (uint32_t)(rsid_det_result.freq_hz + 0.5f);  
 }

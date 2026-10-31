@@ -14,3 +14,5 @@ void rsid_poll(void);                 // сервисный вызов, Core 0
 // Срез работы RSID-детектора: вызывается из rx_dsp_poll() на Core 1  
 // после каждого обработанного входного блока. Держать коротким.  
 void rsid_rx_service_sliced(void);
+
+uint32_t rsid_last_freq_hz(void);   // частота последнего детекта, Гц (Core 0)
