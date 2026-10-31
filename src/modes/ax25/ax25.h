@@ -16,7 +16,8 @@ bool ax25_tx_busy(void);        // идёт посылка
   
 // ---------- RX ----------  
 void ax25_rx_init(uint32_t center_hz);  
-void ax25_rx_push(int16_t sample);                  // fs = 15625 Гц  
+void ax25_rx_stop(void);                          // сброс/выключение декодера  
+void ax25_rx_push(int16_t sample);                // fs = 15625 Гц
   
 // Колбэк декодированного UI-фрейма (FCS проверен). Установить до init;  
 // не задан — кадры печатаются в Serial.  
@@ -25,3 +26,4 @@ void ax25_rx_set_frame_cb(ax25_frame_cb_t cb);
   
 // ---------- Регистрация ----------  
 const ModeIface *ax25_mode_iface(void);
+

@@ -4,9 +4,9 @@
 static const ModeIface s_mode = {  
   .id          = MODE_AX25,  
   .name        = "ax25",  
-  .rsid_code   = 0,  
+  .rsid_code   = 70,               // RSID AX25 — см. fldigi  
   .rx_init     = ax25_rx_init,  
   .rx_push     = ax25_rx_push,  
   .tx_frame    = ax25_tx_frame,  
-};  
+};
 const ModeIface *ax25_mode_iface(void) { return &s_mode; }
