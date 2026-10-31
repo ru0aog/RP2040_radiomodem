@@ -1,4 +1,4 @@
-// RP2040_radiomodem.cpp
+// RP2040_radiomodem.ino  
 // ============================================================================  
 // Полудуплексный цифровой радиомодем на RP2040.  
 //  
@@ -23,6 +23,7 @@
 #include "src/rsid/rsid.h"        // rsid_init/poll — КАРКАС  
 #include "src/modem/modem.h"      // modem_init/poll — КАРКАС
 #include "src/rx/rx_usb_audio.h"
+#include "src/cat/cat.h"         // cat_init/poll — второй CDC (Kenwood TS-2000)  
 #include <Adafruit_TinyUSB.h>
   
 // ============================================================================  
@@ -33,6 +34,7 @@
 volatile bool core0_ready = false;  
   
 void setup() {  
+  cat_init();                     // второй CDC должен быть в дескрипторах до энумерации  
   Serial.begin(115200);  
  
   while (!Serial && millis() < 5000) delay(1);
@@ -65,8 +67,9 @@ void setup() {
 }  
   
 void loop() {  
-  modem_poll();                     // Hayes-модем (КАРКАС)  
-  rx_decoders_poll();               // декодеры/RSID (КАРКАС)  
+  cat_poll();                       // CAT-команды (Kenwood TS-2000, второй CDC)    
+  modem_poll();                     // Hayes-модем (КАРКАС)    
+  rx_decoders_poll();               // декодеры/RSID (КАРКАС) 
   rsid_poll();  
   usb_audio_poll();  
   vfo_thermal_guard();  
@@ -126,8 +129,8 @@ void setup1() {
   // до первого trx_switch.  
   vfo_on_trx_switch(TRX_RX, 14074000);  
   delay(100);                       // пересинхронизация USB CDC + старт SM  
-  vfo_quad_debug();             // [LODBG] clkdiv/enabled/lo_hz
-
+  vfo_quad_debug();                 // [LODBG] clkdiv/enabled/lo_hz
+  cat_set_freq_hz(14074000);        // зеркало FA для ответов CAT (s_rx_hz)  
   rx_dsp_start(14074000);           // NCO = f_rx - vfo_quad_lo_hz()  
   rx_capture_start();               // DMA запускаем ПОСЛЕ настройки NCO
 }  
