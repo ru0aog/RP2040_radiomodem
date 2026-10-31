@@ -24,6 +24,7 @@ uint32_t cw_tx_frame(const uint8_t *payload, uint16_t len);
 void cw_tx_set_wpm(uint8_t wpm);            // скорость телеграфа  
 // Прямой ключ (для ручной передачи/встроенного ключа):  
 void cw_tx_key(bool down);                  // down=true → несущая  
+void cw_rx_stop(void);    // сброс состояния декодера (idle, паттерн, тайминги)
   
 // ---------- Регистрация ----------  
 const ModeIface *cw_mode_iface(void);
