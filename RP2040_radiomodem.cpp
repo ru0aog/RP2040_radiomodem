@@ -67,8 +67,8 @@ void setup() {
   rx_decoders_init();  
   Serial.println("[DBG] before rsid");        Serial.flush();  
   rsid_init();  
-  Serial.println("[DBG] before usb_audio");   Serial.flush();  
-  usb_audio_init();  
+  //Serial.println("[DBG] before usb_audio");   Serial.flush();  
+  //usb_audio_init();  
   Serial.println("[DBG] before modem");       Serial.flush();  
   modem_init();  
   // ----------------------------  
