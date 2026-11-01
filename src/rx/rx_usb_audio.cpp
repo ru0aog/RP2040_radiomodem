@@ -411,6 +411,8 @@ void usb_audio_init(void) {
 
     Serial.println("[UAC] Audio interface initialized");
 
+
+/*
     // Важно: если USB уже перечислен хостом,
     // переподключаем устройство, чтобы Windows
     // заново прочитала конфигурацию и аудиодескрипторы.
@@ -423,8 +425,11 @@ void usb_audio_init(void) {
     }
 
     Serial.println("[UAC] init 44100/16/stereo");
+*/
+Serial.println("[UAC] Re-enumeration skipped");
 }
-  
+
+
 // Вызов из loop() на Core 0. Единственный потребитель аудио-очереди.  
 void usb_audio_poll(void) {  
     // Адаптивная подстройка темпа под часы USB-хоста: держим заполнение  
