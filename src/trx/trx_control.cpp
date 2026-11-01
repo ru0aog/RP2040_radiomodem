@@ -57,7 +57,6 @@ __attribute__((weak)) void tx_pipeline_start(void) {}
 // ИНИЦИАЛИЗАЦИЯ (Core 0, из setup() ПОСЛЕ vfo_init())  
 // ============================================================================  
 void trx_init(TrxVfoHook vfo_hook) {
-  multicore_lockout_victim_init();   // Core 0 = жертва lockout от Core 1  
   s_vfo         = vfo_hook;  
   s_state       = TRX_RX;  
   s_req_active  = false;  
@@ -69,12 +68,7 @@ void trx_init(TrxVfoHook vfo_hook) {
 // ОБРАБОТЧИК НА CORE 1 — дёргать каждую итерацию loop1()  
 // ============================================================================  
 void trx_poll_core1(void) {  
-  static bool victim_inited = false;  
-  if (!victim_inited) {  
-    multicore_lockout_victim_init();   // Core 1 как victim  
-    victim_inited = true;  
-  }  
-  if (!s_req_active) return; 
+  if (!s_req_active) return;
   
   noInterrupts();  
   TrxState target   = s_pending;  

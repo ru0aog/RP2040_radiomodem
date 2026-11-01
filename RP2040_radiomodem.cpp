@@ -177,9 +177,7 @@ void loop() {
 // ============================================================================  
 void setup1() {  
   while (!core0_ready) tight_loop_contents();  
-  Serial.println("[DBG] core1 alive");           Serial.flush();  
-  multicore_lockout_victim_init();  
-  Serial.println("[DBG] core1 victim ok");       Serial.flush();  
+  Serial.println("[DBG] core1 alive");           Serial.flush();
   trx_poll_core1();  
   Serial.println("[DBG] before vfo_on_trx");     Serial.flush();  
   vfo_on_trx_switch(TRX_RX, 14074000);  
