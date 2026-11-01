@@ -26,7 +26,8 @@
 //  
 // ВНУТРИ парковочных окон Serial/printf ЗАПРЕЩЁН: CDC обслуживается  
 // Core 0, printf при припаркованном ядре — дедлок. Диагностика —  
-// только SRAM-флаги (quad_vfo_pll_dbg_stage).  
+// только SRAM-флаги (quad_vfo_pll_dbg_stage). Исключение — timeout  
+// в park_core0: печатает состояние счётчиков и отдаёт управление.  
 #include "quad_vfo_pll.h"  
 #include "hardware/clocks.h"  
 #include "hardware/pll.h"  
@@ -39,6 +40,7 @@
 #include <stdio.h>  
   
 #define QUAD_LOCK_TIMEOUT 20000u  
+#define PARK_ACK_TIMEOUT  10000000u   // ~секунды итераций ожидания ack  
   
 static uint32_t s_clk_sys_hz = 133000000;  
   
@@ -48,17 +50,21 @@ static bool s_pll_quiet = false;
 void quad_vfo_pll_set_quiet(bool on) { s_pll_quiet = on; }  
   
 // --- Протокол парковки Core 0 ------------------------------------  
-// core0_park_req/core0_park_ack — из src/trx/trx_control.cpp:  
-// Core 0 в trx_switch-ожидании крутит core0_wait_in_ram() и  
-// подтверждает уход в RAM записью ack.  
+// Флаги и счётчики — из src/trx/trx_control.cpp:  
+//   core0_park_req / core0_park_ack — сам протокол;  
+//   core0_park_enter / core0_park_exit — сколько раз Core 0 входил/  
+//     выходил из RAM-цикла;  
+//   core0_loop_seen — итерации wait-цикла trx_switch (жив ли Core 0).  
 // core1_pll_done — из скетча: true после первого quad_start в setup1.  
-extern volatile bool core0_park_req;  
-extern volatile bool core0_park_ack;  
-extern volatile bool core1_pll_done;  
+extern volatile bool     core0_park_req;  
+extern volatile bool     core0_park_ack;  
+extern volatile uint32_t core0_park_enter;  
+extern volatile uint32_t core0_park_exit;  
+extern volatile uint32_t core0_loop_seen;  
+extern volatile bool     core1_pll_done;  
   
 // Диагностический счётчик стадий внутри парковочных окон.  
 // Живёт в SRAM, безопасен при припаркованном Core 0 и выключенных IRQ.  
-// Читать после зависания через отладчик/дамп:  
 //   0 — функция не входила в окно  
 //   1 — после park (Core 0 в RAM)  
 //   2 — после clk_sys_to_xosc  
@@ -72,21 +78,45 @@ static bool __not_in_flash_func(use_flag_park)(void) {
   return (get_core_num() == 1) && core1_pll_done;  
 }  
   
-// Парковка Core 0. Возврата нет, пока ядро не в RAM-цикле.  
-static void __not_in_flash_func(park_core0)(bool flag_mode) {  
+// Парковка Core 0. true — ack получен, Core 0 в RAM-цикле.  
+// false — timeout: печатаем состояние протокола и уходим, без парковки  
+// продолжать нельзя (Core 0 умрёт на смене шины) — поэтому дальше по  
+// коду окно просто не открывается.  
+static bool __not_in_flash_func(park_core0)(bool flag_mode) {  
   if (flag_mode) {  
     core0_park_req = true;  
     __dmb();  
-    while (!core0_park_ack) { }  
-  } else {  
-    rp2040.idleOtherCore();  
+    uint32_t spins = 0;  
+    while (!core0_park_ack) {  
+      if (++spins > PARK_ACK_TIMEOUT) {  
+        // Core 0 ещё НЕ припаркован — Serial здесь безопасен.  
+        Serial.printf("[PLL] PARK TIMEOUT req=%d ack=%d "  
+                      "enter=%lu exit=%lu loop=%lu stage=%lu\n",  
+                      (int)core0_park_req, (int)core0_park_ack,  
+                      (unsigned long)core0_park_enter,  
+                      (unsigned long)core0_park_exit,  
+                      (unsigned long)core0_loop_seen,  
+                      (unsigned long)quad_vfo_pll_dbg_stage);  
+        Serial.flush();  
+        core0_park_req = false;  
+        __dmb();  
+        return false;  
+      }  
+    }  
+    return true;  
   }  
+  rp2040.idleOtherCore();  
+  return true;  
 }  
   
+// Unpark. __sev() ОБЯЗАТЕЛЕН: core0_wait_in_ram() ждёт на __wfe(),  
+// без события Core 0 может не проснуться — и trx_switch повиснет  
+// уже на стороне Core 0.  
 static void __not_in_flash_func(unpark_core0)(bool flag_mode) {  
   if (flag_mode) {  
     core0_park_req = false;             // Core 0 выйдет из wait_in_ram сам  
     __dmb();  
+    __sev();                            // разбудить __wfe() на Core 0  
   } else {  
     rp2040.resumeOtherCore();  
   }  
@@ -166,7 +196,11 @@ static bool __not_in_flash_func(rollback_nominal)(
     const quad_vfo_pll_t *nominal, uint64_t xosc_hz) {  
   quad_vfo_pll_dbg_stage = 0;  
   bool flag_mode = use_flag_park();  
-  park_core0(flag_mode);  
+  if (!park_core0(flag_mode)) {  
+    // ack не получен — шину не трогаем, сообщаем провал.  
+    QP_LOG("[QUAD] rollback: park timeout — откат отменён\n");  
+    return false;  
+  }  
   quad_vfo_pll_dbg_stage = 1;  
   
   uint32_t ints = save_and_disable_interrupts();  
@@ -233,7 +267,11 @@ bool __not_in_flash_func(quad_vfo_set_clk_sys)(
   quad_vfo_pll_dbg_stage = 0;  
   
   bool flag_mode = use_flag_park();  
-  park_core0(flag_mode);  
+  if (!park_core0(flag_mode)) {  
+    // Без парковки в окно нельзя. Core 0 жив — выходим с провалом,  
+    // trx_switch сам сообщит о таймауте/ошибке.  
+    return false;  
+  }  
   quad_vfo_pll_dbg_stage = 1;  
   
   detach_peri();  
@@ -299,7 +337,11 @@ bool __not_in_flash_func(quad_vfo_set_clk_sys)(
     quad_vfo_pll_dbg_stage = 0;  
   
     bool flag_mode2 = use_flag_park();  
-    park_core0(flag_mode2);  
+    if (!park_core0(flag_mode2)) {  
+      Serial.printf("[PLL] dbg: retry %d park timeout\n", attempt);  
+      Serial.flush();  
+      break;  
+    }  
     quad_vfo_pll_dbg_stage = 1;  
   
     uint32_t ints2 = save_and_disable_interrupts();  

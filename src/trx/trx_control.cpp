@@ -22,7 +22,7 @@
 #include "trx_control.h"  
 #include "../mem/mem_arena.h"  
 #include "pico/multicore.h"     // get_core_num(), tight_loop_contents()  
-#include "hardware/sync.h"      // __dmb()  
+#include "hardware/sync.h"      // __dmb(), __sev(), __wfe()  
   
 // Таймаут ожидания завершения переключения на Core 1.  
 // Должен покрывать худший случай VFO-hook: полный PLL-скан clk_sys  
@@ -50,31 +50,39 @@ static volatile bool     s_req_done     = false;
 // Решение: Core 0 сам следит за core0_park_req в своём цикле ожидания.  
 // Увидев req, он выставляет core0_park_ack и уходит в RAM-резидентный  
 // цикл (функция __not_in_flash_func — иначе Core 0 умрёт на переключении  
-// шины, исполняя код из flash). Когда Core 1 сбрасывает req, Core 0  
-// выходит и продолжает ожидание trx_switch.  
+// шины, исполняя код из flash). Когда Core 1 сбрасывает req и шлёт __sev(),  
+// Core 0 выходит и продолжает ожидание trx_switch.  
 //  
 // Читается/пишется из quad_vfo_pll.cpp (extern volatile bool).  
-volatile bool     core0_park_req  = false;  // Core 1 → Core 0: "уйди в RAM"  
-volatile bool     core0_park_ack  = false;  // Core 0 → Core 1: "я в RAM, можно"  
+volatile bool     core0_park_req   = false;  // Core 1 → Core 0: "уйди в RAM"  
+volatile bool     core0_park_ack   = false;  // Core 0 → Core 1: "я в RAM, можно"  
   
-// Диагностика: инкрементируется Core 0 на каждом витке trx_switch-ожидания.  
-// Если после зависания значение замерло — Core 0 умер до парковки;  
-// если растёт при зависшем dbg_stage=90 — Core 0 крутится, но не видит req.  
-volatile uint32_t core0_loop_seen = 0;  
+// Диагностика протокола парковки (SRAM, читаются из quad_vfo_pll.cpp  
+// при таймауте ожидания ack и отладчиком):  
+//   core0_loop_seen  — витки цикла trx_switch-ожидания (замёрз — Core 0 умер);  
+//   core0_park_enter — сколько раз Core 0 вошёл в RAM-цикл;  
+//   core0_park_exit  — сколько раз вышел (enter != exit+1 при зависании —  
+//                      Core 0 сейчас спит в core0_wait_in_ram).  
+volatile uint32_t core0_loop_seen  = 0;  
+volatile uint32_t core0_park_enter = 0;  
+volatile uint32_t core0_park_exit  = 0;  
   
 // RAM-резидентное ожидание снятия park_req.  
 // ВНИМАНИЕ: внутри нельзя вызывать ничего из flash — только чтение/запись  
 // volatile-флагов и барьеры. Вся функция живёт в SRAM.  
 void __not_in_flash_func(core0_wait_in_ram)(void) {  
+  ++core0_park_enter;  
   core0_park_ack = true;  
   __dmb();  
   while (core0_park_req) {  
     // Спим в SRAM, пока Core 1 переключает clk_sys/PLL.  
-    // __wfe() — тоже RAM-инструкция, экономим на шине.  
+    // __wfe() — RAM-инструкция; просыпаемся по __sev() с Core 1,  
+    // флаг перечитываем после пробуждения.  
     __wfe();  
   }  
   core0_park_ack = false;  
   __dmb();  
+  ++core0_park_exit;  
 }  
   
 // ============================================================================  
@@ -161,6 +169,15 @@ bool trx_switch(TrxState target, uint32_t freq_hz) {
   uint32_t t0 = millis();  
   while (!s_req_done) {  
     ++core0_loop_seen;                     // диагностика: цикл жив  
+  
+    // Парковка по флаг-протоколу — ПЕРВЫМ делом на каждом витке:  
+    // Core 1 ждёт ack и не переключит clk_sys, пока Core 0 не ушёл  
+    // в RAM. Отвечаем сами — без handshake через idleOtherCore,  
+    // который здесь зависал. core0_wait_in_ram() вернётся после unpark.  
+    if (core0_park_req) {  
+      core0_wait_in_ram();  
+    }  
+  
     if (millis() - t0 > TRX_SWITCH_TIMEOUT_MS) {  
       // НЕ сбрасываем s_req_active: Core 1, если жив, завершит  
       // переход сам и выставит done/state корректно.  
@@ -171,12 +188,6 @@ bool trx_switch(TrxState target, uint32_t freq_hz) {
                     target == TRX_TX ? "TX" : "RX",  
                     (unsigned long)freq_hz, (int)s_state);  
       return false;  
-    }  
-    // Парковка по флаг-протоколу: Core 1 просит уйти в RAM-цикл  
-    // на время переключения clk_sys. Отвечаем сами — без handshake  
-    // через idleOtherCore, который здесь зависал.  
-    if (core0_park_req) {  
-      core0_wait_in_ram();              // вернётся после unpark  
     }  
     tight_loop_contents();  
   }  
