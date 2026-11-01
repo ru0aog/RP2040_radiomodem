@@ -97,7 +97,7 @@ RxModeId rx_decoders_mode(void) { return active_rx; }
 // декодер настраивает корреляторы/тон на фактическую частоту посылки.  
 // ---------------------------------------------------------------------------  
 void rx_decoders_on_rsid(uint16_t code) {  
-    const ModeIface* m = modes_get_by_rsid((uint8_t)code);  
+    const ModeIface* m = modes_get_by_rsid(code);
     if (!m) {  
         Serial.printf("[DEC] rsid code=%u — моды нет в реестре\n",  
                       (unsigned)code);  
