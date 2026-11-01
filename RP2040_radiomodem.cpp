@@ -15,6 +15,7 @@
 #include "src/pins.h"  
 #include "src/trx/trx_control.h"  
 #include "src/vfo/vfo.h"  
+#include "src/vfo/soft_tx.h"     // soft_tx_debug()
 
 #include "src/mem/mem_arena.h"  
 #include "src/rx/rx_capture.h"    // rx_capture_start() — КАРКАС  

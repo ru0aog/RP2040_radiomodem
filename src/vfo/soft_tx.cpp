@@ -854,3 +854,11 @@ static const VfoEngine s_engine = {
   soft_tx_tone, soft_tx_poll, soft_tx_actual_hz  
 };  
 const VfoEngine *vfo_engine_soft_tx(void) { return &s_engine; }
+
+
+// ---------- Диагностика ----------  
+void soft_tx_debug(void) {  
+  Serial.printf("[STX] running=%d boosted=%d throttled=%d clk_sys=%lu Hz\n",  
+                (int)s_running, (int)clk_boosted, (int)thermal_throttled,  
+                (unsigned long)clock_get_hz(clk_sys));  
+}
