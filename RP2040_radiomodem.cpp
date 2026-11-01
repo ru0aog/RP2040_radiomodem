@@ -29,15 +29,15 @@
     
 // ============================================================================    
 // Перекрёстная синхронизация ядер.    
-//  - core0_ready: Core 0 закончил инициализацию (включая UAC), Core 1 может    
-//    входить в PLL-перенастройку quad LO.    
-//  - core1_pll_done: Core 1 завершил стартовую перенастройку clk_sys.    
-//    
-// Порядок важен: usb_audio_init() идёт ДО core0_ready — на штатных 133 МГц    
-// и пока Core 1 ещё ждёт флаг (никакой парковки Core 0). Внутри    
-// usb_audio_init() есть принудительная реэнумерация USB (detach/attach);    
-// если она попадёт под idleOtherCore или на разогнанную шину — CDC умирает    
-// (был завис на "[UAC] Re-enumerating USB").    
+//  - core0_ready: Core 0 закончил инициализацию (кроме UAC), Core 1 может  
+//    входить в PLL-перенастройку quad LO.  
+//  - core1_pll_done: Core 1 завершил стартовую перенастройку clk_sys.  
+//  
+// Порядок важен: usb_audio_init() идёт ПОСЛЕ PLL-окна (после core1_pll_done).  
+// На время idleOtherCore/флаг-парковки на Core 0 должен быть пустой цикл —  
+// живой TinyUSB-стек во время парковки кладёт handshake (завис на  
+// "before park", flag=0). Реэнумерация в usb_audio_init отключена —  
+// UAC поднимается без detach/attach.
 // ============================================================================    
 volatile bool core0_ready    = false;    
 volatile bool core1_pll_done = false;    
@@ -68,26 +68,24 @@ void setup() {
   rsid_init();    
   modem_init();    
     
-  // UAC ДО отпускания Core 1: шина ещё 133 МГц, Core 0 никто не паркует —    
-  // реэнумерация CDC/UAC проходит безопасно.    
-  Serial.println("[DBG] before usb_audio");  Serial.flush();    
-  usb_audio_init();    
-  Serial.println("[DBG] after usb_audio");   Serial.flush();    
-    
-  vfo_debug_dump();                  // разовый снимок состояния    
-
-  pinMode(LED_BUILTIN, OUTPUT);
-    
-  // Отпускаем Core 1: он перенастроит clk_sys → 337.5 МГц, паркуя Core 0    
-  // через idleOtherCore. В это время мы в пустом цикле ожидания —    
-  // безопасная точка парковки (USB-стек кратковременно встаёт, но хост    
-  // это переживает; никакой реэнумерации в этот момент нет).    
-  core0_ready = true;    
-  while (!core1_pll_done) delay(1);    
-    
-  Serial.println("[DBG] setup done");    
-  Serial.flush();    
-}    
+  vfo_debug_dump();                  // разовый снимок состояния  
+  
+  pinMode(LED_BUILTIN, OUTPUT);  
+  
+  // Отпускаем Core 1: он перенастроит clk_sys → 337.5 МГц, паркуя Core 0  
+  // через idleOtherCore. В это время мы в ПУСТОМ цикле ожидания — без  
+  // TinyUSB/CDC-активности, единственная безопасная точка парковки.  
+  // UAC после этого поднимается уже на стабильной шине и без реэнумерации.  
+  core0_ready = true;  
+  while (!core1_pll_done) tight_loop_contents();  
+  
+  Serial.println("[DBG] before usb_audio");  Serial.flush();  
+  usb_audio_init();  
+  Serial.println("[DBG] after usb_audio");   Serial.flush();  
+  
+  Serial.println("[DBG] setup done");  
+  Serial.flush();  
+}
     
 void loop() {  
   
