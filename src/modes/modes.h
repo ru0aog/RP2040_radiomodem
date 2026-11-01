@@ -15,7 +15,8 @@ typedef enum {
   MODE_RTTY,
   MODE_OLIVIA,
   MODE_CONTESTIA,
-  MODE_JTTY,  
+  MODE_JTTY,
+  MODE_IFKP,
   MODE_COUNT
 } ModeId;
   

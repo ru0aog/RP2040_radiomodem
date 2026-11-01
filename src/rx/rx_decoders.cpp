@@ -15,6 +15,7 @@
 #include "../modes/olivia/olivia.h" // olivia_rx_stop
 #include "../modes/contestia/contestia.h" // contestia_rx_stop
 #include "../modes/jtty/jtty.h" // jtty_rx_stop
+#include "../modes/ifkp/ifkp.h"   // ifkp_rx_stop
   
 static const ModeIface* active_mode = 0;  
 static RxModeId         active_rx   = RX_MODE_NONE;  
@@ -36,6 +37,7 @@ static RxModeId rx_id_for(ModeId id) {
         case MODE_OLIVIA:   return RX_MODE_OLIVIA;  
         case MODE_CONTESTIA: return RX_MODE_CONTESTIA;
         case MODE_JTTY:     return RX_MODE_JTTY;
+        case MODE_IFKP:     return RX_MODE_IFKP;
         default:            return RX_MODE_NONE; 
     }  
 }  
@@ -53,6 +55,7 @@ static void stop_active_decoder(void) {
         case MODE_OLIVIA: olivia_rx_stop(); break;
         case MODE_CONTESTIA: contestia_rx_stop(); break;
         case MODE_JTTY:        jtty_rx_stop(); break;
+        case MODE_IFKP:     ifkp_rx_stop();    break;
         default: break;  
     }  
 }  
@@ -79,6 +82,7 @@ void rx_decoders_set_mode(RxModeId id) {
         case RX_MODE_OLIVIA: mid = MODE_OLIVIA; break;
         case RX_MODE_CONTESTIA: mid = MODE_CONTESTIA; break;
         case RX_MODE_JTTY:     mid = MODE_JTTY; break;
+        case RX_MODE_IFKP:     mid = MODE_IFKP; break;
         default:             mid = MODE_NONE;   break;  
     }  
     const ModeIface* m = modes_get(mid);  

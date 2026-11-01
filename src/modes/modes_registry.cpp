@@ -5,7 +5,8 @@
 #include "rtty/rtty.h"      // rtty_mode_iface()
 #include "olivia/olivia.h"
 #include "contestia/contestia.h"
-#include "jtty/jtty.h"      // jtty_mode_iface()  
+#include "jtty/jtty.h"      // jtty_mode_iface()
+#include "ifkp/ifkp.h"      // ifkp_mode_iface()
   
 static const ModeIface* const modes_table[] = {  
     ax25_mode_iface(),  
@@ -14,6 +15,7 @@ static const ModeIface* const modes_table[] = {
     olivia_mode_iface(),  
     contestia_mode_iface(),
     jtty_mode_iface(),
+    ifkp_mode_iface(),
 };
   
 #define MODES_N (sizeof(modes_table) / sizeof(modes_table[0]))  
