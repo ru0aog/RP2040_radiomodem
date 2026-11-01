@@ -5,7 +5,7 @@
 // блок 64 тона → 3 символа. Walsh-Hadamard SPB=64,  
 // Scramble=0xE257E6D0291574EC, nShift=13, 7-бит ASCII, Gray-тоны.  
 #include "olivia.h"  
-#include "../../dsp/rx_goertzel.h"  
+#include "../../rx/rx_goertzel.h" 
 #include <math.h>  
 #include <string.h>  
   
