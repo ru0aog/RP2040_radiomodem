@@ -1,1 +1,0 @@
-for examples see the https://github.com/pschatzmann/stm32f723-disco library
