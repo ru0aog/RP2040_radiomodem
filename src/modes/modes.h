@@ -15,13 +15,14 @@ typedef enum {
   MODE_RTTY,
   MODE_OLIVIA,
   MODE_CONTESTIA,
+  MODE_JTTY,  
   MODE_COUNT
 } ModeId;
   
 struct ModeIface {  
   ModeId id;  
   const char *name;  
-  uint8_t rsid_code;   // NEW: RSID-код моды; 0 = нет авто-детекта  
+  uint16_t rsid_code;  // RSID-код (до 2047; JTTY=1172); 0 = нет авто-детекта  
   void (*rx_init)(uint32_t center_hz);  
   void (*rx_push)(int16_t sample);  
   uint32_t (*tx_frame)(const uint8_t *payload, uint16_t len);  
@@ -29,4 +30,4 @@ struct ModeIface {
   
 // Реестр мод — заполняется в modes_registry.cpp.  
 const ModeIface *modes_get(ModeId id);  
-const ModeIface *modes_get_by_rsid(uint8_t rsid_code);
+const ModeIface *modes_get_by_rsid(uint16_t rsid_code);

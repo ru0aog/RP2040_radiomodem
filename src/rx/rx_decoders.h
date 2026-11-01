@@ -13,6 +13,7 @@ typedef enum {
   RX_MODE_RTTY,  
   RX_MODE_OLIVIA,
   RX_MODE_CONTESTIA,
+  RX_MODE_JTTY,  
   // RX_MODE_FT8, ... — расширяется при порте мод  
 } RxModeId;
   
