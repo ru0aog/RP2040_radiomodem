@@ -1,105 +1,107 @@
-// RP2040_radiomodem.ino    
-// ============================================================================    
-// Полудуплексный цифровой радиомодем на RP2040.    
-//    
-// Приёмный тракт (наследие RP2040_receiver: ADC+DMA → DDC → децимация →    
-// демодуляция) и передающий тракт (наследие RP2040_beacon: модулятор →    
-// дизеринг-DDS на PIO) ФИЗИЧЕСКИ раздельны и никогда не работают    
-// одновременно — ядро 1 арендуется через trx_control.    
-//    
-// Core 1 (реальное время): либо RX-конвейер, либо TX-генератор.    
-//   Плюс vfo_poll() — сервис активного VFO-движка (MASH-дизеринг в TX).    
-// Core 0 (приложение): CAT/CLI, декодеры + RSID, планировщик, Hayes-модем,    
-//   датчики, LCD. Единственный путь в эфир — trx_switch().    
-// ============================================================================    
-#include "src/pins.h"    
-#include "src/trx/trx_control.h"    
-#include "src/vfo/vfo.h"    
-#include "src/vfo/soft_tx.h"     // soft_tx_debug()    
-    
-#include "src/mem/mem_arena.h"    
-#include "src/rx/rx_capture.h"    // rx_capture_start()    
-#include "src/rx/rx_dsp.h"        // rx_dsp_init/rx_dsp_poll    
-#include "src/rx/rx_decoders.h"   // rx_decoders_init/poll    
-#include "src/rsid/rsid.h"        // rsid_init/poll    
-#include "src/modem/modem.h"      // modem_init/poll    
-#include "src/rx/rx_usb_audio.h"    
-#include "src/cat/cat.h"          // cat_init/poll — Kenwood TS-2000    
-#include <Adafruit_TinyUSB.h>    
-    
-// ============================================================================    
-// Перекрёстная синхронизация ядер.    
-//  - core0_ready: Core 0 закончил инициализацию (кроме UAC), Core 1 может  
-//    входить в PLL-перенастройку quad LO.  
-//  - core1_pll_done: Core 1 завершил стартовую перенастройку clk_sys.  
+// RP2040_radiomodem.ino  
+// ============================================================================  
+// Полудуплексный цифровой радиомодем на RP2040.  
 //  
-// Порядок важен: usb_audio_init() идёт ПОСЛЕ PLL-окна (после core1_pll_done).  
-// На время idleOtherCore/флаг-парковки на Core 0 должен быть пустой цикл —  
-// живой TinyUSB-стек во время парковки кладёт handshake (завис на  
-// "before park", flag=0). Реэнумерация в usb_audio_init отключена —  
-// UAC поднимается без detach/attach.
-// ============================================================================    
-volatile bool core0_ready    = false;    
-volatile bool core1_pll_done = false;    
-
-// Флаг-протокол парковки Core 0 — объекты определены в src/trx/trx_control.cpp.  
-// Core 0 обслуживает их в while(!core1_pll_done) и в trx_switch-ожидании.  
-extern volatile bool core0_park_req;  
-extern void core0_wait_in_ram(void);
-    
-void setup() {    
-  Serial.begin(115200);    
-    
-  while (!Serial && millis() < 5000) delay(1);    
-    
-  cat_init();                        // CAT на этом же порту    
-    
-  Serial.println();    
-  Serial.println("RP2040_radiomodem — полудуплексный цифровой радиомодем");    
-  Serial.println("====================================================");    
-  Serial.flush();    
-    
-  mem_arena_init();    
-  Serial.printf("mem_arena: TRX pool %u B, SHARED %u B\n",    
-                (unsigned)mem_arena_capacity(MEM_PHASE_RX),    
-                (unsigned)mem_arena_capacity(MEM_PHASE_SHARED));    
-    
-  pins_init();    
-  vfo_init();    
-  trx_init(vfo_on_trx_switch);       // hook VFO на события RX/TX    
-    
-  rx_dsp_init();    
-  rx_decoders_init();    
-  rsid_init();    
-  modem_init();    
-    
-  vfo_debug_dump();                  // разовый снимок состояния  
+// Приёмный тракт (наследие RP2040_receiver: ADC+DMA → DDC → децимация →  
+// демодуляция) и передающий тракт (наследие RP2040_beacon: модулятор →  
+// дизеринг-DDS на PIO) ФИЗИЧЕСКИ раздельны и никогда не работают  
+// одновременно — ядро 1 арендуется через trx_control.  
+//  
+// Core 1 (реальное время): либо RX-конвейер, либо TX-генератор.  
+//   Плюс vfo_poll() — сервис активного VFO-движка (MASH-дизеринг в TX).  
+// Core 0 (приложение): CAT/CLI, декодеры + RSID, планировщик, Hayes-модем,  
+//   датчики, LCD, LED.  
+// ============================================================================  
+  
+#include <Arduino.h>  
+#include "src/mem/mem_arena.h"  
+#include "src/rx/rx_capture.h"  
+#include "src/rx/rx_dsp.h"  
+#include "src/rx/rx_decoders.h"  
+#include "src/rx/rx_usb_audio.h"      // usb_audio_init — проверить по факту  
+#include "src/rsid/rsid.h"  
+#include "src/trx/trx_control.h"  
+#include "src/vfo/vfo.h"  
+#include "src/vfo/soft_tx.h"  
+#include "src/vfo/quad_vfo/quad_vfo.h"  
+#include "src/cat/cat.h"  
+#include "src/modem/modem.h"  
+  
+// ============================================================================  
+// Флаг-протокол парковки Core 0 (объекты в src/trx/trx_control.cpp).  
+// Core 1 запрашивает уход Core 0 в RAM-цикл на время переключения clk_sys.  
+// Обслуживаем запросы в while(!core1_pll_done) и в trx_switch-ожидании.  
+// ============================================================================  
+extern volatile uint32_t core0_park_req;  
+extern void core0_park_poll(void);           // НЕ static в trx_control.cpp  
+  
+// ============================================================================  
+// Глобальные  
+// ============================================================================  
+volatile bool core0_ready    = false;  
+volatile bool core1_pll_done = false;  
+  
+// ============================================================================  
+// SETUP — Core 0  
+// ============================================================================  
+void setup() {  
+  Serial.begin(115200);  
+  
+  Serial.println("[CAT] init: shared CDC port");  
+  Serial.println();  
+  Serial.println("RP2040_radiomodem — полудуплексный цифровой радиомодем");  
+  Serial.println("====================================================");  
+  Serial.flush();  
   
   pinMode(LED_BUILTIN, OUTPUT);  
   
-  // Отпускаем Core 1: он перенастроит clk_sys → 337.5 МГц, паркуя Core 0  
-  // через idleOtherCore. В это время мы в ПУСТОМ цикле ожидания — без  
-  // TinyUSB/CDC-активности, единственная безопасная точка парковки.  
-  // UAC после этого поднимается уже на стабильной шине и без реэнумерации.  
-  core0_ready = true;  
-  while (!core1_pll_done) {  
-    if (core0_park_req) {       // Core 1 просит уйти в RAM на время clk_sys  
-      core0_wait_in_ram();    // флаги/функция из trx_control.cpp  
-    }  
-    tight_loop_contents();  
-  }
+  vfo_init();                                // движки, банк тонов, хук  
+  trx_init(vfo_on_trx_switch);               // mem_arena_init + привязка VFO  
+  Serial.printf("mem_arena: TRX pool %u B, SHARED %u B\n",  
+                (unsigned)mem_arena_capacity(MEM_PHASE_TX),  
+                (unsigned)mem_arena_capacity(MEM_PHASE_SHARED));  
   
-  Serial.println("[DBG] before usb_audio");  Serial.flush();  
-  usb_audio_init();  
-  Serial.println("[DBG] after usb_audio");   Serial.flush();  
+  rx_dsp_init();  
+  Serial.println("[RX] dsp init");  
+  rx_decoders_init();  
+  Serial.println("[DEC] init");  
+  rsid_init();  
+  Serial.println("[RSID] init (verbatim port)");  
+  modem_init();  
+  Serial.println("[STUB] modem_init: Hayes core skeleton");  
+  
+  Serial.printf("[VFO] clk_sys=%lu Hz  tone=%u  xosc=%llu Hz\n",  
+                (unsigned long)vfo_clk_sys_hz(),  
+                (unsigned)vfo_tone_active(),  
+                (unsigned long long)vfo_xosc_hz());  
+  Serial.flush();  
+  
+  core0_ready = true;                        // запуск loop1() на Core 1  
+  
+  // Ждём окончания PLL-окна quad-движка (Core 1, setup1).  
+  // ОБЯЗАТЕЛЬНО: обслуживаем park-протокол — Core 1 вызывает  
+  // set_clk_sys с флаг-парковкой; без poll() парк уйдёт в PARK TIMEOUT.  
+  // В этой точке на Core 0 — пустой цикл без USB: живой TinyUSB-стек  
+  // во время парковки кладёт handshake (был завис на "before park").  
+  while (!core1_pll_done) {  
+    core0_park_poll();  
+    tight_loop_contents();  
+  }  
+  
+  Serial.println("[DBG] before usb_audio");  
+  usb_audio_init();                          // UAC — ПОСЛЕ PLL-окна  
+  Serial.println("[DBG] after usb_audio");  
   
   Serial.println("[DBG] setup done");  
   Serial.flush();  
-}
-    
+}  
+  
+// ============================================================================  
+// LOOP — Core 0  
+// ============================================================================  
 void loop() {  
   
-  // --- Маячок живости: 2 Гц. Замёрз — прошивка умерла, мигает — мёртв только вывод.  
+  // Маячок живости: 2 Гц. Замёрз — прошивка умерла, мигает — мёртв только вывод.  
   static uint32_t t_blink = 0;  
   static bool     led = false;  
   if (millis() - t_blink > 250) {  
@@ -126,42 +128,39 @@ void loop() {
     }  
   }  
   
-  // Перебор тонов — только в TX  
-  if (tx_started && trx_state() == TRX_TX && millis() - t_tone > 500) {  
+  if (tx_started && trx_state() == TRX_TX &&  
+      millis() - t_tone > 500) {  
     t_tone = millis();  
     vfo_tone(tone_idx);  
-    tone_idx = (tone_idx + 1) % 4;  
+    Serial.printf("[TEST] tone %u -> %lu Hz\n",  
+                  (unsigned)tone_idx,  
+                  (unsigned long)vfo_bank_tone_hz(tone_idx));  
+    tone_idx = (tone_idx + 1) & 3;  
   }  
   
-  // Возврат в RX через 10 с TX — проверка разгонной шины и перезахвата quad-LO  
-  static uint32_t t_tx_start = 0;  
+  // --- Возврат в RX через 10 с ---  
+  static uint32_t t_back = 0;  
   if (tx_started && trx_state() == TRX_TX) {  
-    if (!t_tx_start) t_tx_start = millis();  
-    if (millis() - t_tx_start > 10000) {  
-      t_tx_start = 0;  
+    if (t_back == 0) t_back = millis();  
+    if (millis() - t_back > 10000) {  
+      t_back = 0;  
       bool ok = trx_switch(TRX_RX, 14074000UL);  
-      Serial.printf("[TEST] trx_switch(RX) = %d clk_sys=%lu\n",  
-                    (int)ok, (unsigned long)vfo_clk_sys_hz());  
-      tx_started = false;          // для повтора цикла — сбросить и дать restart  
+      Serial.printf("[TEST] trx_switch(RX, 14074000) = %d\n", (int)ok);  
     }  
   }  
   
-  cat_poll();                        // CAT-команды (Kenwood TS-2000)  
-  modem_poll();                      // Hayes-модем  
-  rx_decoders_poll();                // декодеры/RSID  
-  rsid_poll();  
-  usb_audio_poll();  
-  vfo_thermal_guard();  
+  rx_decoders_poll();  
   
-  // Периодическая диагностика: водяной знак арены + состояние.  
-  static uint32_t t_diag = 0;  
-  if (millis() - t_diag > 10000) {  
-    t_diag = millis();  
-    Serial.printf("arena watermark: %u / %u B | state=%s | tone=%u | clk_sys=%lu Hz\n",  
+  // --- Пульс-строка раз в секунду ---  
+  static uint32_t t_stat = 0;  
+  if (millis() - t_stat > 1000) {  
+    t_stat = millis();  
+    Serial.printf("arena watermark: %u / %u B | state=%s | tone=%u | "  
+                  "clk_sys=%lu Hz\n",  
                   (unsigned)mem_arena_watermark(),  
-                  (unsigned)mem_arena_capacity(MEM_PHASE_RX),  
+                  (unsigned)mem_arena_capacity(MEM_PHASE_TX),  
                   trx_state() == TRX_TX ? "TX" :  
-                  trx_state() == TRX_RX ? "RX" : "SWITCHING",  
+                   trx_state() == TRX_RX ? "RX" : "SWITCHING",  
                   (unsigned)vfo_tone_active(),  
                   (unsigned long)vfo_clk_sys_hz());  
     static uint32_t t_rxdbg = 0;  
@@ -176,41 +175,38 @@ void loop() {
                   (unsigned long)rx_drop_queue_full,  
                   (unsigned long)rx_drop_busy);  
   }  
-}
-    
-// ============================================================================    
-// Core 1 — хозяин реального времени    
-// ============================================================================    
-void setup1() {    
-  while (!core0_ready) tight_loop_contents();  // ждём инициализацию (вкл. UAC)    
-    
-  trx_poll_core1();                            // инициализация TRX на core1    
-    
-  // Старт RX-генератора при загрузке: квадратурный LO на f_rx - ПЧ.    
-  // Внутри — PLL-скан и смена clk_sys под парковкой Core 0 (idleOtherCore).    
-  vfo_on_trx_switch(TRX_RX, 14074000);    
-    
-  core1_pll_done = true;             // Core 0 может выйти из ожидания    
-
-
-    
-  delay(100);                        // старт SM    
-  vfo_quad_debug();                  // [LODBG] clkdiv/enabled/lo_hz    
-  cat_set_freq_hz(14074000);         // зеркало FA для ответов CAT (s_rx_hz)    
-  rx_dsp_start(14074000);            // NCO = f_rx - vfo_quad_lo_hz()    
-  rx_capture_start();                // DMA запускаем ПОСЛЕ настройки NCO    
-}    
-    
-volatile uint32_t dbg_l1 = 0, dbg_poll_in = 0, dbg_poll_out = 0;    
-    
-void loop1() {    
-  ++dbg_l1;    
-  trx_poll_core1();    
-  if (trx_state() == TRX_RX) {    
-    ++dbg_poll_in;    
-    rx_dsp_poll();    
-    ++dbg_poll_out;    
-  } else {    
-    vfo_poll();    
-  }    
+}  
+  
+// ============================================================================  
+// SETUP1 — Core 1  
+// ============================================================================  
+void setup1() {  
+  while (!core0_ready) tight_loop_contents();  
+  
+  // Стартовый RX: VFO-hook → quad_vfo → set_clk_sys → разгон 337.5 МГц.  
+  // Паркует Core 0 флаг-протоколом (Core 0 уже в while(!core1_pll_done)  
+  // с core0_park_poll — handshake обслуживается).  
+  vfo_on_trx_switch(TRX_RX, 14074000);  
+  
+  core1_pll_done = true;             // Core 0 выходит из ожидания  
+  
+  delay(100);                        // старт SM  
+  vfo_quad_debug();                  // [LODBG] clkdiv/enabled/lo_hz  
+  cat_set_freq_hz(14074000);         // зеркало FA для ответов CAT (s_rx_hz)  
+  rx_dsp_start(14074000);            // NCO = f_rx - vfo_quad_lo_hz()  
+  rx_capture_start();                // DMA запускаем ПОСЛЕ настройки NCO  
+}  
+  
+volatile uint32_t dbg_l1 = 0, dbg_poll_in = 0, dbg_poll_out = 0;  
+  
+void loop1() {  
+  ++dbg_l1;  
+  trx_poll_core1();  
+  if (trx_state() == TRX_RX) {  
+    ++dbg_poll_in;  
+    rx_dsp_poll();  
+    ++dbg_poll_out;  
+  } else {  
+    vfo_poll();  
+  }  
 }
