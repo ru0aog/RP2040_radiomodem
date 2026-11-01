@@ -149,7 +149,8 @@ void loop() {
     }  
   }  
   
-  rx_decoders_poll();  
+  rx_decoders_poll();
+  usb_audio_poll();            // выкачиваем аудио-очередь rx_dsp -> UAC
   
   // --- Пульс-строка раз в секунду ---  
   static uint32_t t_stat = 0;  

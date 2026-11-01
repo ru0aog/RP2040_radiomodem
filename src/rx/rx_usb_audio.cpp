@@ -412,7 +412,7 @@ void usb_audio_init(void) {
     Serial.println("[UAC] Audio interface initialized");
 
 
-/*
+
     // Важно: если USB уже перечислен хостом,
     // переподключаем устройство, чтобы Windows
     // заново прочитала конфигурацию и аудиодескрипторы.
@@ -425,7 +425,7 @@ void usb_audio_init(void) {
     }
 
     Serial.println("[UAC] init 44100/16/stereo");
-*/
+
 Serial.println("[UAC] Re-enumeration skipped");
 }
 

@@ -470,7 +470,10 @@ bool quad_vfo_start(uint32_t freq_hz) {
                                      &s_cfg.pll_nominal, xosc_hz,
                                      &nominal_ok);
 
-  uint64_t clk_sys_hz = clock_get_hz(clk_sys);
+  // стало: измеренная частота после переключения (FC0), а не кэш SDK  
+  uint64_t clk_sys_hz = quad_vfo_clk_sys_hz();  
+  // или, надёжнее, свежий замер:  
+  // uint64_t clk_sys_hz = quad_vfo_clk_sys_meas_hz();
   uint32_t div_q8;
   int64_t f_nco;
   bool is_int;
