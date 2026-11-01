@@ -52,8 +52,8 @@ void setup() {
 
   while (!Serial && millis() < 5000) delay(1);
   
-  Serial.println("[CAT] init: shared CDC port");  
-  Serial.println();  
+  cat_init();                     // выведет "[CAT] init: shared CDC port" и armed cat_enabled  
+  Serial.println();
   Serial.println("RP2040_radiomodem — полудуплексный цифровой радиомодем");  
   Serial.println("====================================================");  
   Serial.flush();  
@@ -150,6 +150,7 @@ void loop() {
     }  
   }  
   
+  cat_poll();                     // разбор команд с основного CDC, разделитель ';'
   rx_decoders_poll();
   usb_audio_poll();            // выкачиваем аудио-очередь rx_dsp -> UAC
   
