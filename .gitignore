@@ -1,0 +1,4 @@
+.pio/
+.vscode/
+*.zip
+*.tar.gz
