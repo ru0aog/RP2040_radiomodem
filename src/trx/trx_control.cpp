@@ -54,8 +54,13 @@ static volatile bool     s_req_done     = false;
 // выходит и продолжает ожидание trx_switch.  
 //  
 // Читается/пишется из quad_vfo_pll.cpp (extern volatile bool).  
-volatile bool core0_park_req = false;   // Core 1 → Core 0: "уйди в RAM"  
-volatile bool core0_park_ack = false;   // Core 0 → Core 1: "я в RAM, можно"  
+volatile bool     core0_park_req  = false;  // Core 1 → Core 0: "уйди в RAM"  
+volatile bool     core0_park_ack  = false;  // Core 0 → Core 1: "я в RAM, можно"  
+  
+// Диагностика: инкрементируется Core 0 на каждом витке trx_switch-ожидания.  
+// Если после зависания значение замерло — Core 0 умер до парковки;  
+// если растёт при зависшем dbg_stage=90 — Core 0 крутится, но не видит req.  
+volatile uint32_t core0_loop_seen = 0;  
   
 // RAM-резидентное ожидание снятия park_req.  
 // ВНИМАНИЕ: внутри нельзя вызывать ничего из flash — только чтение/запись  
@@ -155,6 +160,7 @@ bool trx_switch(TrxState target, uint32_t freq_hz) {
   
   uint32_t t0 = millis();  
   while (!s_req_done) {  
+    ++core0_loop_seen;                     // диагностика: цикл жив  
     if (millis() - t0 > TRX_SWITCH_TIMEOUT_MS) {  
       // НЕ сбрасываем s_req_active: Core 1, если жив, завершит  
       // переход сам и выставит done/state корректно.  
