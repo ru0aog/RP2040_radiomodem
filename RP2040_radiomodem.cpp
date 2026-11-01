@@ -67,7 +67,24 @@ void setup() {
   delay(200);                       // дать Core 1 дойти до quad_start  
 }  
   
-void loop() {  
+void loop() {
+
+  // --- Разовый тест: перевести генератор в TX на 3650000 Гц и оставить ---  
+  static bool tx_started = false;  
+  if (!tx_started && millis() > 3000) {          // дать RX/USB подняться  
+    tx_started = true;  
+    bool ok = trx_switch(TRX_TX, 3650000UL);  
+    Serial.printf("[TEST] trx_switch(TX, 3650000) = %d\n", (int)ok);  
+    if (ok) {  
+      vfo_bank_set_grid(3650000UL, 0, 1);         // 1 тон, шаг 0 → ровно 3.65 МГц  
+      vfo_tone(0);  
+      soft_tx_debug();  
+      Serial.printf("[TEST] actual=%lu Hz clk_sys=%lu Hz\n",  
+                    (unsigned long)vfo_actual_hz(),  
+                    (unsigned long)vfo_clk_sys_hz());  
+    }  
+  }  
+
   cat_poll();                       // CAT-команды (Kenwood TS-2000, второй CDC)    
   modem_poll();                     // Hayes-модем (КАРКАС)    
   rx_decoders_poll();               // декодеры/RSID (КАРКАС) 
@@ -92,6 +109,7 @@ void loop() {
   }  
   */  
   
+
   // Периодическая диагностика: водяной знак арены + состояние.  
   static uint32_t t_diag = 0;  
   if (millis() - t_diag > 10000) {  
