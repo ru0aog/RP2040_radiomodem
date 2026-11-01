@@ -40,7 +40,11 @@ static volatile TrxState s_pending      = TRX_RX;
 static volatile uint32_t s_pending_freq = 0;  
 static volatile bool     s_req_active   = false;  
 static volatile bool     s_req_done     = false;  
-  
+// Core 0 ждёт завершения переключения в trx_switch() — уже спит  
+// в пустом цикле, парковать его через idleOtherCore не нужно.  
+// Читается из quad_vfo_pll.cpp (extern volatile bool).  
+volatile bool core0_in_trx_wait = false;
+
 // ============================================================================  
 // WEAK-ЗАГЛУШКИ КОНВЕЙЕРОВ  
 // extern "C" — то же соглашение, что в заголовке: при появлении реальных  
@@ -117,17 +121,20 @@ bool trx_switch(TrxState target, uint32_t freq_hz) {
   s_pending_freq = freq_hz;  
   s_pending      = target;  
   s_req_done     = false;  
+  // Флаг ДО публикации запроса: Core 1 может дойти до  
+  // quad_vfo_set_clk_sys → idleOtherCore раньше, чем мы попадём  
+  // в цикл ожидания. Core 0 с этого момента «номинально спит» —  
+  // парковать его во время PLL-окна нельзя.  
+  core0_in_trx_wait = true;  
   __dmb();  
   s_req_active   = true;                   // публиковать последним  
   
-  // Ждём, пока Core 1 выполнит последовательность. Таймаут должен  
-  // покрывать PLL-скан VFO — это СОТНИ миллисекунд, не микросекунды.  
-  uint32_t t0 = millis();  
+  uint32_t t0 = millis(); 
   while (!s_req_done) {  
     if (millis() - t0 > TRX_SWITCH_TIMEOUT_MS) {  
       // НЕ сбрасываем s_req_active: Core 1, если жив, завершит  
-      // переход сам и выставит done/state корректно. Сброс здесь  
-      // создавал бы расхождение "переключились, а Core 0 не знает".  
+      // переход сам и выставит done/state корректно.  
+      core0_in_trx_wait = false;  
       Serial.printf("[TRX] switch timeout -> %s (%lu Hz), "  
                     "state=%d — core1 завис или VFO-скан слишком долгий\n",  
                     target == TRX_TX ? "TX" : "RX",  
@@ -136,7 +143,9 @@ bool trx_switch(TrxState target, uint32_t freq_hz) {
     }  
     tight_loop_contents();  
   }  
-  return (s_state == target);  
+  core0_in_trx_wait = false;  
+  __dmb();  
+  return (s_state == target);
 }  
   
 // ============================================================================  
