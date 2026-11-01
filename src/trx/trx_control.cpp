@@ -61,14 +61,20 @@ void trx_init(TrxVfoHook vfo_hook) {
   s_state       = TRX_RX;  
   s_req_active  = false;  
   s_req_done    = false;  
-  mem_arena_init();  
+  mem_arena_init();
+  multicore_lockout_victim_init();   // Core 0 как victim — до любых set_clk_sys
 }  
   
 // ============================================================================  
 // ОБРАБОТЧИК НА CORE 1 — дёргать каждую итерацию loop1()  
 // ============================================================================  
 void trx_poll_core1(void) {  
-  if (!s_req_active) return;  
+  static bool victim_inited = false;  
+  if (!victim_inited) {  
+    multicore_lockout_victim_init();   // Core 1 как victim  
+    victim_inited = true;  
+  }  
+  if (!s_req_active) return; 
   
   noInterrupts();  
   TrxState target   = s_pending;  

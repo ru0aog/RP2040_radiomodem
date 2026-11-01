@@ -19,6 +19,7 @@
 #include "hardware/structs/ssi.h"
 #include "hardware/structs/pll.h"
 #include "hardware/regs/pll.h"
+#include "pico/multicore.h"   // multicore_lockout_*  
 #include <stdio.h>
 
 #define QUAD_LOCK_TIMEOUT 20000u
@@ -99,20 +100,22 @@ static bool __not_in_flash_func(pll_setup_bounded)(uint32_t refdiv,
 
 // true: nominal profile acquired and clk_sys switched to PLL.
 // false: LOCK was not acquired; clk_sys stays on XOSC.
-static bool __not_in_flash_func(rollback_nominal)(
-    const quad_vfo_pll_t *nominal, uint64_t xosc_hz) {
-  uint32_t ints = save_and_disable_interrupts();
-  clk_sys_to_xosc(xosc_hz);
-
-  bool ok = pll_setup_bounded(nominal->refdiv, nominal->fbdiv,
-                              nominal->p1, nominal->p2);
-  if (ok) {
-    clk_sys_to_pll(nominal->clk_sys_hz);
-    s_clk_sys_hz = nominal->clk_sys_hz;
-  } else {
-    s_clk_sys_hz = (uint32_t)xosc_hz;
-  }
-  restore_interrupts(ints);
+static bool __not_in_flash_func(rollback_nominal)(  
+    const quad_vfo_pll_t *nominal, uint64_t xosc_hz) {  
+  multicore_lockout_start_blocking();  
+  uint32_t ints = save_and_disable_interrupts();  
+  clk_sys_to_xosc(xosc_hz);  
+  
+  bool ok = pll_setup_bounded(nominal->refdiv, nominal->fbdiv,  
+                              nominal->p1, nominal->p2);  
+  if (ok) {  
+    clk_sys_to_pll(nominal->clk_sys_hz);  
+    s_clk_sys_hz = nominal->clk_sys_hz;  
+  } else {  
+    s_clk_sys_hz = (uint32_t)xosc_hz;  
+  }  
+  restore_interrupts(ints);  
+  multicore_lockout_end_blocking();
 
   if (!ok) {
     QP_LOG("[QUAD] rollback: номинальный PLL без LOCK — шина на XOSC!");
@@ -150,12 +153,14 @@ bool __not_in_flash_func(quad_vfo_set_clk_sys)(
     busy_wait_us(500);
   }
 
-  detach_peri();
-  uint32_t ints_status = save_and_disable_interrupts();
-  clk_sys_to_xosc(xosc_hz);
-
-  if (!pll_setup_bounded(cfg.refdiv, cfg.fbdiv, cfg.p1, cfg.p2)) {
-    restore_interrupts(ints_status);
+  multicore_lockout_start_blocking();      // Core 1 в безопасном ожидании  
+  detach_peri();  
+  uint32_t ints_status = save_and_disable_interrupts();  
+  clk_sys_to_xosc(xosc_hz);  
+  
+  if (!pll_setup_bounded(cfg.refdiv, cfg.fbdiv, cfg.p1, cfg.p2)) {  
+    restore_interrupts(ints_status);  
+    multicore_lockout_end_blocking();  
     bool rb = rollback_nominal(nominal, xosc_hz);
     if (out_nominal_ok) *out_nominal_ok = rb;
     if (!is_oc) {
@@ -177,20 +182,19 @@ bool __not_in_flash_func(quad_vfo_set_clk_sys)(
   ssi_hw->baudr  = ssi_baud;
   ssi_hw->ssienr = 1;
 
-  clk_sys_to_pll(target_clk_hz);
-  restore_interrupts(ints_status);
-
+  clk_sys_to_pll(target_clk_hz);  
+  restore_interrupts(ints_status);  
+  multicore_lockout_end_blocking();        // шина на новом PLL — Core 1 отпускаем  
+  
   bool     locked_ok = false;  
   uint32_t meas_hz   = 0;  
   // Верификация в герцах: expect*1003 в u64 — u32 переполнится  
   // уже при ~4,2 МГц. Окно ±0,3% прежнее.  
   const uint64_t expect_hz = cfg.clk_sys_hz;  
   
-  for (int attempt = 0; attempt < 3; attempt++) {  
-  busy_wait_us(300);  
-    uint32_t meas_khz =  
-        frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_SYS);  
-    meas_hz = meas_clk_sys_hz();  
+for (int attempt = 0; attempt < 3; attempt++) {  
+    busy_wait_us(300);  
+    meas_hz = meas_clk_sys_hz();
     QP_LOG("[PLL] attempt %d: meas=%lu Hz expect=%llu Hz\n",  
                   attempt, (unsigned long)meas_hz,  
                   (unsigned long long)expect_hz);  
@@ -200,14 +204,17 @@ bool __not_in_flash_func(quad_vfo_set_clk_sys)(
       break;  
     }
 
-    uint32_t ints2 = save_and_disable_interrupts();
-    clk_sys_to_xosc(xosc_hz);
-    if (!pll_setup_bounded(cfg.refdiv, cfg.fbdiv, cfg.p1, cfg.p2)) {
-      restore_interrupts(ints2);
-      break;
-    }
-    clk_sys_to_pll(target_clk_hz);
-    restore_interrupts(ints2);
+    multicore_lockout_start_blocking();  
+    uint32_t ints2 = save_and_disable_interrupts();  
+    clk_sys_to_xosc(xosc_hz);  
+    if (!pll_setup_bounded(cfg.refdiv, cfg.fbdiv, cfg.p1, cfg.p2)) {  
+      restore_interrupts(ints2);  
+      multicore_lockout_end_blocking();  
+      break;  
+    }  
+    clk_sys_to_pll(target_clk_hz);  
+    restore_interrupts(ints2);  
+    multicore_lockout_end_blocking();  
   }
 
   if (!locked_ok) {
