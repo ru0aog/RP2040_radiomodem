@@ -12,22 +12,18 @@
 //   PWR: POSTDIVPD = 0  
 //  
 // Парковка Core 0 на время переключения clk_sys — ОБЯЗАТЕЛЬНА:  
-// диагностикой подтверждено, что без парковки Core 0 не переживает  
-// смену шины (flash-код + XIP).  
+// без неё Core 0 не переживает смену шины (flash-код + XIP).  
 //  
 // Два механизма парковки:  
-//   1. Флаг-протокол (Core 1, core1_pll_done=true): Core 0 уже ждёт  
-//      в RAM-цикле core0_wait_in_ram() внутри trx_switch — мы только  
-//      взводим core0_park_req и ждём core0_park_ack. Никакого  
-//      handshake: idleOtherCore в этом состоянии висел (Core 0 не  
-//      обслуживает lockout-IRQ из tight wait).  
-//   2. idleOtherCore (старт до core1_pll_done, вызовы с Core 0) —  
-//      доказанно работает, т.к. Core 0 в "чистом" ожидании.  
+//   1. Флаг-протокол (вызов с Core 1): Core 0 находится в одном из  
+//      wait-циклов (while(!core1_pll_done) в setup или trx_switch) и  
+//      по core0_park_req уходит в core0_wait_in_ram(), отвечая ack.  
+//   2. idleOtherCore — только для вызова с Core 0.  
 //  
 // ВНУТРИ парковочных окон Serial/printf ЗАПРЕЩЁН: CDC обслуживается  
 // Core 0, printf при припаркованном ядре — дедлок. Диагностика —  
 // только SRAM-флаги (quad_vfo_pll_dbg_stage). Исключение — timeout  
-// в park_core0: печатает состояние счётчиков и отдаёт управление.  
+// в park_core0 (Core 0 ещё не припаркован).  
 #include "quad_vfo_pll.h"  
 #include "hardware/clocks.h"  
 #include "hardware/pll.h"  
@@ -49,44 +45,28 @@ static bool s_pll_quiet = false;
 #define QP_LOG(...)  do { if (!s_pll_quiet) Serial.printf(__VA_ARGS__); } while (0)  
 void quad_vfo_pll_set_quiet(bool on) { s_pll_quiet = on; }  
   
-// --- Протокол парковки Core 0 ------------------------------------  
-// Флаги и счётчики — из src/trx/trx_control.cpp:  
-//   core0_park_req / core0_park_ack — сам протокол;  
-//   core0_park_enter / core0_park_exit — сколько раз Core 0 входил/  
-//     выходил из RAM-цикла;  
-//   core0_loop_seen — итерации wait-цикла trx_switch (жив ли Core 0).  
-// core1_pll_done — из скетча: true после первого quad_start в setup1.  
+// --- Протокол парковки Core 0 (объекты в src/trx/trx_control.cpp) ---  
 extern volatile bool     core0_park_req;  
 extern volatile bool     core0_park_ack;  
 extern volatile uint32_t core0_park_enter;  
 extern volatile uint32_t core0_park_exit;  
 extern volatile uint32_t core0_loop_seen;  
-//extern volatile bool     core1_pll_done;  
   
-// Диагностический счётчик стадий внутри парковочных окон.  
-// Живёт в SRAM, безопасен при припаркованном Core 0 и выключенных IRQ.  
-//   0 — функция не входила в окно  
-//   1 — после park (Core 0 в RAM)  
-//   2 — после clk_sys_to_xosc  
-//   3 — после pll_setup_bounded  
-//   4 — после clk_sys_to_pll (перед unpark)  
-//   5 — после unpark  
+// Диагностический счётчик стадий внутри парковочных окон (SRAM).  
+//   0 — вне окна; 1 — после park; 2 — после clk_sys_to_xosc;  
+//   3 — после pll_setup_bounded; 4 — после mux на PLL; 5 — после unpark  
 volatile uint32_t quad_vfo_pll_dbg_stage = 0;  
   
 // true → флаг-протокол; false → rp2040.idleOtherCore().  
 static bool __not_in_flash_func(use_flag_park)(void) {  
-  // Флаг-протокол — всегда, когда вызов с Core 1: Core 0 в этот  
-  // момент гарантированно в одном из двух wait-циклов —  
-  // while(!core1_pll_done) на старте или trx_switch-ожидании.  
   return (get_core_num() == 1);  
-}
+}  
   
 // Парковка Core 0. true — ack получен, Core 0 в RAM-цикле.  
-// false — timeout: печатаем состояние протокола и уходим, без парковки  
-// продолжать нельзя (Core 0 умрёт на смене шины) — поэтому дальше по  
-// коду окно просто не открывается.  
 static bool __not_in_flash_func(park_core0)(bool flag_mode) {  
   if (flag_mode) {  
+    core0_park_ack = false;             // гасим stale-ack прошлого сегмента  
+    __dmb();  
     core0_park_req = true;  
     __dmb();  
     uint32_t spins = 0;  
@@ -103,6 +83,7 @@ static bool __not_in_flash_func(park_core0)(bool flag_mode) {
         Serial.flush();  
         core0_park_req = false;  
         __dmb();  
+        __sev();  
         return false;  
       }  
     }  
@@ -112,14 +93,12 @@ static bool __not_in_flash_func(park_core0)(bool flag_mode) {
   return true;  
 }  
   
-// Unpark. __sev() ОБЯЗАТЕЛЕН: core0_wait_in_ram() ждёт на __wfe(),  
-// без события Core 0 может не проснуться — и trx_switch повиснет  
-// уже на стороне Core 0.  
+// Unpark. __sev() обязателен: core0_wait_in_ram() спит на __wfe().  
 static void __not_in_flash_func(unpark_core0)(bool flag_mode) {  
   if (flag_mode) {  
-    core0_park_req = false;             // Core 0 выйдет из wait_in_ram сам  
+    core0_park_req = false;  
     __dmb();  
-    __sev();                            // разбудить __wfe() на Core 0  
+    __sev();  
   } else {  
     rp2040.resumeOtherCore();  
   }  
@@ -132,7 +111,6 @@ static uint32_t __not_in_flash_func(meas_clk_sys_hz)(void) {
   return frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_SYS) * 1000u;  
 }  
   
-// Публичный вариант для debug-вывода (клапан обычный, без flash-атрибута).  
 uint32_t quad_vfo_clk_sys_meas_hz(void) { return meas_clk_sys_hz(); }  
   
 uint32_t quad_vfo_vsel_for(uint64_t clk_hz) {  
@@ -155,19 +133,42 @@ static void __not_in_flash_func(clk_sys_to_xosc)(uint64_t xosc_hz) {
                   xosc_hz, xosc_hz);  
 }  
   
-static void __not_in_flash_func(clk_sys_to_pll)(uint64_t hz) {  
-  clock_configure(clk_sys,  
-                  CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,  
-                  CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,  
-                  hz, hz);  
+// Голый mux clk_sys -> PLL_SYS, только регистры, без clock_configure.  
+// AUXSRC нельзя менять, пока шина сидит на aux (не glitchless) —  
+// поэтому: src -> clk_ref, ждём, меняем AUXSRC, src -> aux, ждём.  
+static void __not_in_flash_func(clk_sys_src_to_pll)(void) {  
+  // 1. src = clk_ref (glitchless)  
+  hw_clear_bits(&clocks_hw->clk[clk_sys].ctrl, CLOCKS_CLK_SYS_CTRL_SRC_BITS);  
+  while (!(clocks_hw->clk[clk_sys].selected & 1u)) {  
+    tight_loop_contents();  
+  }  
+  // 2. делитель = 1  
+  clocks_hw->clk[clk_sys].div = (1u << CLOCKS_CLK_SYS_DIV_INT_LSB) &  
+                                CLOCKS_CLK_SYS_DIV_BITS;  
+  __dmb();  
+  // 3. auxsrc = PLL_SYS (шина сейчас не на aux — безопасно)  
+  hw_write_masked(&clocks_hw->clk[clk_sys].ctrl,  
+      (uint32_t)CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS  
+          << CLOCKS_CLK_SYS_CTRL_AUXSRC_LSB,  
+      CLOCKS_CLK_SYS_CTRL_AUXSRC_BITS);  
+  // 4. src = aux  
+  hw_set_bits(&clocks_hw->clk[clk_sys].ctrl, CLOCKS_CLK_SYS_CTRL_SRC_BITS);  
+  while (!(clocks_hw->clk[clk_sys].selected & (1u << 1))) {  
+    tight_loop_contents();  
+  }  
 }  
-  
+
+// Ждём LOCK PLL_SYS с ограничением по числу итераций (без SDK, без flash).  
+// Таймаут считается итерациями, а не через time_us: шина в этот момент  
+// на XOSC, и лишние обращения не нужны. QUAD_LOCK_TIMEOUT = 20000 итераций  
+// на 12 МГц — это единицы мс, а реальный захват занимает десятки мкс.  
 static bool __not_in_flash_func(wait_pll_lock)(void) {  
-  uint32_t timeout = QUAD_LOCK_TIMEOUT;  
-  while (!(pll_sys_hw->cs & PLL_CS_LOCK_BITS) && --timeout) {}  
-  return (pll_sys_hw->cs & PLL_CS_LOCK_BITS) != 0;  
-}  
-  
+  for (uint32_t i = 0; i < QUAD_LOCK_TIMEOUT; ++i) {  
+    if (pll_sys_hw->cs & PLL_CS_LOCK_BITS) return true;  
+  }  
+  return false;  
+}
+
 static bool __not_in_flash_func(pll_setup_bounded)(uint32_t refdiv,  
                                                    uint32_t fbdiv,  
                                                    uint32_t p1,  
@@ -192,15 +193,13 @@ static bool __not_in_flash_func(pll_setup_bounded)(uint32_t refdiv,
   return true;  
 }  
   
-// true: nominal profile acquired and clk_sys switched to PLL.  
-// false: LOCK was not acquired; clk_sys stays on XOSC.  
-// Парковка обязательна; внутри окна — только SRAM-стадии, без Serial.  
+// true: номинальный профиль получен, clk_sys на PLL.  
+// false: LOCK не получен; clk_sys остаётся на XOSC.  
 static bool __not_in_flash_func(rollback_nominal)(  
     const quad_vfo_pll_t *nominal, uint64_t xosc_hz) {  
   quad_vfo_pll_dbg_stage = 0;  
   bool flag_mode = use_flag_park();  
   if (!park_core0(flag_mode)) {  
-    // ack не получен — шину не трогаем, сообщаем провал.  
     QP_LOG("[QUAD] rollback: park timeout — откат отменён\n");  
     return false;  
   }  
@@ -216,7 +215,7 @@ static bool __not_in_flash_func(rollback_nominal)(
   if (ok) {  
     ssi_hw->baudr = 4;  
     __dmb();  
-    clk_sys_to_pll(nominal->clk_sys_hz);  
+    clk_sys_src_to_pll();  
     s_clk_sys_hz = nominal->clk_sys_hz;  
   } else {  
     s_clk_sys_hz = (uint32_t)xosc_hz;  
@@ -227,7 +226,7 @@ static bool __not_in_flash_func(rollback_nominal)(
   quad_vfo_pll_dbg_stage = 5;  
   
   if (!ok) {  
-    QP_LOG("[QUAD] rollback: номинальный PLL без LOCK — шина на XOSC!");  
+    QP_LOG("[QUAD] rollback: номинальный PLL без LOCK — шина на XOSC!\n");  
   }  
   return ok;  
 }  
@@ -266,11 +265,8 @@ bool __not_in_flash_func(quad_vfo_set_clk_sys)(
     vreg_set_voltage((vreg_voltage)vsel);  
     busy_wait_us(500);  
   }  
-
-
-
-
-Serial.println("[PLL] dbg: before park");  Serial.flush();  
+  
+  Serial.println("[PLL] dbg: before park");  Serial.flush();  
   quad_vfo_pll_dbg_stage = 0;  
   
   bool flag_mode = use_flag_park();  
@@ -288,6 +284,7 @@ Serial.println("[PLL] dbg: before park");  Serial.flush();
   
   // Сегмент 2: PLL setup  
   if (!park_core0(flag_mode)) return false;  
+  quad_vfo_pll_dbg_stage = 2;  
   ints_status = save_and_disable_interrupts();  
   bool pll_ok = pll_setup_bounded(cfg.refdiv, cfg.fbdiv, cfg.p1, cfg.p2);  
   restore_interrupts(ints_status);  
@@ -300,25 +297,20 @@ Serial.println("[PLL] dbg: before park");  Serial.flush();
     return false;  
   }  
   
-  // Сегмент 3: clk_sys -> PLL  
-// Сегмент 3: clk_sys -> PLL  
+  // Сегмент 3: clk_sys -> PLL (голый mux). Serial — только ДО park.  
+  Serial.println("[PLL] dbg: before park3");  Serial.flush();  
   if (!park_core0(flag_mode)) return false;  
+  quad_vfo_pll_dbg_stage = 3;  
   ints_status = save_and_disable_interrupts();  
-  // Замедлить XIP ДО повышения clk_sys: flash-чтение через SSI  
-  // должно успевать за новой шиной. Делитель от XOSC-частоты —  
-  // безопасен и на 337 МГц, и на номинале.  
-  ssi_hw->baudr = 4;   // XIP clock = clk_sys / 4, как в версии до e62077a  
+  ssi_hw->baudr = 4;                    // XIP ≤ 84 МГц на 337.5 МГц  
   __dmb();  
-  clk_sys_to_pll(target_clk_hz);  
+  clk_sys_src_to_pll();  
+  quad_vfo_pll_dbg_stage = 4;  
   restore_interrupts(ints_status);  
-  unpark_core0(flag_mode);
+  unpark_core0(flag_mode);  
   quad_vfo_pll_dbg_stage = 5;  
-  Serial.println("[PLL] dbg: switched");  Serial.flush();
-
-
-
-
-
+  Serial.println("[PLL] dbg: switched");  Serial.flush();  
+  
   bool     locked_ok = false;  
   uint32_t meas_hz   = 0;  
   const uint64_t expect_hz = cfg.clk_sys_hz;  
@@ -327,15 +319,15 @@ Serial.println("[PLL] dbg: before park");  Serial.flush();
     busy_wait_us(300);  
     meas_hz = meas_clk_sys_hz();  
     QP_LOG("[PLL] attempt %d: meas=%lu Hz expect=%llu Hz\n",  
-                  attempt, (unsigned long)meas_hz,  
-                  (unsigned long long)expect_hz);  
+           attempt, (unsigned long)meas_hz,  
+           (unsigned long long)expect_hz);  
     if ((uint64_t)meas_hz * 1000ull > expect_hz * 997ull &&  
         (uint64_t)meas_hz * 1000ull < expect_hz * 1003ull) {  
       locked_ok = true;  
       break;  
     }  
   
-    // Ретрай — отдельное парковочное окно, Serial тоже запрещён внутри.  
+    // Ретрай — отдельное парковочное окно, Serial внутри запрещён.  
     Serial.printf("[PLL] dbg: retry %d\n", attempt);  Serial.flush();  
     quad_vfo_pll_dbg_stage = 0;  
   
@@ -362,8 +354,8 @@ Serial.println("[PLL] dbg: before park");  Serial.flush();
   
     ssi_hw->baudr = 4;  
     __dmb();  
-    clk_sys_to_pll(target_clk_hz);  
-    quad_vfo_pll_dbg_stage = 4;
+    clk_sys_src_to_pll();  
+    quad_vfo_pll_dbg_stage = 4;  
     restore_interrupts(ints2);  
     unpark_core0(flag_mode2);  
     quad_vfo_pll_dbg_stage = 5;  
