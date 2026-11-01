@@ -23,6 +23,9 @@
 #define QUAD_LOCK_TIMEOUT   20000u  
 #define PARK_TIMEOUT_US     1000000u  
 #define FLASH_SAFE_MAX_HZ   48000000u  
+// Запасной счётный таймаут парковки — time_us_32() может встать  
+// при перестройке часов, и ограниченное ожидание станет вечным.  
+#define PARK_SPIN_LIMIT     4000000u
   
 extern volatile uint32_t core0_park_req;  
 extern volatile uint32_t core0_park_ack;  
@@ -64,10 +67,13 @@ static bool __not_in_flash_func(park_core0)(bool flag_mode) {
   if (!flag_mode) { rp2040.idleOtherCore(); return true; }  
   
   uint32_t t0 = time_us_32();  
+  uint32_t spins = PARK_SPIN_LIMIT;        // запасной потолок без таймера  
   // 1. Дождаться выхода Core 0 из прошлого окна.  
   while (core0_park_inside) {  
-    if (time_us_32() - t0 > PARK_TIMEOUT_US) { s_park_timeout = true; return false; }  
-  }  
+    if ((time_us_32() - t0 > PARK_TIMEOUT_US) || --spins == 0) {  
+      s_park_timeout = true; return false;  
+    }  
+  }
   // 2. Новое поколение (0 зарезервирован).  
   if (++s_park_gen == 0) s_park_gen = 1;  
   uint32_t gen = s_park_gen;  
@@ -76,15 +82,16 @@ static bool __not_in_flash_func(park_core0)(bool flag_mode) {
   __dmb();  
   __sev();  
   // 3. Ждать подтверждения именно этого поколения.  
+  spins = PARK_SPIN_LIMIT;  
   while (core0_park_ack != gen) {  
-    if (time_us_32() - t0 > PARK_TIMEOUT_US) {  
+    if ((time_us_32() - t0 > PARK_TIMEOUT_US) || --spins == 0) {  
       core0_park_req = 0;  
       __dmb();  
       __sev();  
       s_park_timeout = true;  
       return false;  
     }  
-  }  
+  }
   return true;  
 }  
   
@@ -116,24 +123,32 @@ static void detach_peri(void) {            // вызывается ВНЕ окн
                   48u * 1000000u, 48u * 1000000u);  
 }  
   
-// clk_sys: AUX -> clk_ref (безглитчево), сменить AUXSRC, обратно на AUX.  
-static void __not_in_flash_func(clk_sys_mux_aux)(uint32_t auxsrc) {  
-  clock_hw_t *c = &clocks_hw->clk[clk_sys];  
-  hw_clear_bits(&c->ctrl, CLOCKS_CLK_SYS_CTRL_SRC_BITS);       // -> clk_ref  
-  while (!(c->selected & 1u)) { }  
-  hw_write_masked(&c->ctrl, auxsrc << CLOCKS_CLK_SYS_CTRL_AUXSRC_LSB,  
-                  CLOCKS_CLK_SYS_CTRL_AUXSRC_BITS);  
-  c->div = 1u << CLOCKS_CLK_SYS_DIV_INT_LSB;                    // делитель 1  
-  hw_set_bits(&c->ctrl, CLOCKS_CLK_SYS_CTRL_SRC_BITS);         // -> AUX  
-  while (!(c->selected & 2u)) { }  
-}  
+// Счётный таймаут, НЕ time_us_32(): при перестройке часов таймер  
+// может не тикать, и «ограниченное» ожидание станет вечным.  
+#define MUX_SEL_TIMEOUT 200000u  
   
-static void __not_in_flash_func(clk_sys_to_xosc)(void) {  
-  clk_sys_mux_aux(CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_XOSC_CLKSRC);  
+static bool __not_in_flash_func(clk_sys_mux_aux)(uint32_t auxsrc) {  
+  clock_hw_t *c = &clocks_hw->clk[clk_sys];  
+  hw_clear_bits(&c->ctrl, CLOCKS_CLK_SYS_CTRL_SRC_BITS);  
+  uint32_t t = MUX_SEL_TIMEOUT;  
+  while (!(c->selected & 1u) && --t) {}  
+  if (!t) return false;  
+  hw_write_masked(&c->ctrl,  
+                  auxsrc << CLOCKS_CLK_SYS_CTRL_AUXSRC_LSB,  
+                  CLOCKS_CLK_SYS_CTRL_AUXSRC_BITS);  
+  c->div = 1u << CLOCKS_CLK_SYS_DIV_INT_LSB;  
+  hw_set_bits(&c->ctrl, CLOCKS_CLK_SYS_CTRL_SRC_BITS);  
+  t = MUX_SEL_TIMEOUT;  
+  while (!(c->selected & 2u) && --t) {}  
+  return t != 0;  
+}
+  
+static bool __not_in_flash_func(clk_sys_to_xosc)(void) {  
+  return clk_sys_mux_aux(CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_XOSC_CLKSRC);  
 }  
-static void __not_in_flash_func(clk_sys_to_pll)(void) {  
-  clk_sys_mux_aux(CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS);  
-}  
+static bool __not_in_flash_func(clk_sys_to_pll)(void) {  
+  return clk_sys_mux_aux(CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS);  
+}
   
 // BAUDR можно менять только при SSIENR=0. Ставить ДО подъёма частоты.  
 static void __not_in_flash_func(ssi_set_baud_for)(uint32_t clk_hz) {  
@@ -178,9 +193,10 @@ static int __not_in_flash_func(switch_sequence)(const quad_vfo_pll_t *c,
   if (!park_core0(fm)) return 1;  
   quad_vfo_pll_dbg_stage = 1;  
   ints = save_and_disable_interrupts();  
-  clk_sys_to_xosc();  
+  bool mux_ok = clk_sys_to_xosc();  
   restore_interrupts(ints);  
   unpark_core0(fm);  
+  if (!mux_ok) return 11;            // clk_ref не подтвердил selected
   
   if (!park_core0(fm)) return 2;  
   quad_vfo_pll_dbg_stage = 2;  
@@ -190,16 +206,17 @@ static int __not_in_flash_func(switch_sequence)(const quad_vfo_pll_t *c,
   unpark_core0(fm);  
   if (!ok) return 10;  
   
-  if (!park_core0(fm)) return 3;  
+if (!park_core0(fm)) return 3;  
   quad_vfo_pll_dbg_stage = 3;  
   ints = save_and_disable_interrupts();  
   ssi_set_baud_for(hz);              // ДО подъёма частоты  
   quad_vfo_pll_dbg_stage = 4;  
-  clk_sys_to_pll();  
+  bool pll_mux_ok = clk_sys_to_pll();  
   restore_interrupts(ints);  
   unpark_core0(fm);  
+  if (!pll_mux_ok) return 13;        // aux/PLL не подтвердил selected  
   quad_vfo_pll_dbg_stage = 5;  
-  return 0;  
+  return 0;
 }  
   
 static bool rollback_nominal(const quad_vfo_pll_t *nominal, uint64_t xosc_hz) {  
@@ -229,15 +246,23 @@ bool quad_vfo_set_clk_sys(const quad_vfo_pll_t *cfg_in, uint32_t vsel,
   
   uint32_t target_clk_hz = (uint32_t)(((uint64_t)cfg.fbdiv * xosc_hz) /  
                            ((uint64_t)cfg.refdiv * cfg.p1 * cfg.p2));  
-  bool is_oc = (target_clk_hz > s_clk_sys_hz);  
+  // Реальную частоту меряем — кэш s_clk_sys_hz рассинхронизирован  
+  // с soft_tx_set_clk_sys() (у того свой кэш current_clk_sys_hz).  
+  uint32_t cur_hz = meas_clk_sys_hz();  
+  bool is_oc = (target_clk_hz > cur_hz); 
   bool fm    = use_flag_park();  
   
   Serial.printf("[PLL] dbg: entry target=%lu oc=%d flag=%d\n",  
                 (unsigned long)target_clk_hz, (int)is_oc, (int)fm);  
   Serial.flush();                    // последний flush ДО окон  
   
-  if (is_oc) { vreg_set_voltage((vreg_voltage)vsel); busy_wait_us(500); }  
-  detach_peri();  
+  // Поднимаем VREG, если переход вверх ИЛИ цель выше номинала 133 МГц —  
+  // тогда запас по напряжению нужен в любом случае.  
+  if (is_oc || target_clk_hz > 133000000u) {  
+    vreg_set_voltage((vreg_voltage)vsel);  
+    busy_wait_us(500);  
+  }  
+  detach_peri();
   quad_vfo_pll_dbg_stage = 0;  
   
   int r = switch_sequence(&cfg, target_clk_hz, fm);  
