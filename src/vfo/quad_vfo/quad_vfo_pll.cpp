@@ -211,6 +211,8 @@ static bool __not_in_flash_func(rollback_nominal)(
                               nominal->p1, nominal->p2);  
   quad_vfo_pll_dbg_stage = 3;  
   if (ok) {  
+    ssi_hw->baudr = 4;  
+    __dmb();  
     clk_sys_to_pll(nominal->clk_sys_hz);  
     s_clk_sys_hz = nominal->clk_sys_hz;  
   } else {  
@@ -296,17 +298,23 @@ Serial.println("[PLL] dbg: before park");  Serial.flush();
   }  
   
   // Сегмент 3: clk_sys -> PLL  
+// Сегмент 3: clk_sys -> PLL  
   if (!park_core0(flag_mode)) return false;  
   ints_status = save_and_disable_interrupts();  
+  // Замедлить XIP ДО повышения clk_sys: flash-чтение через SSI  
+  // должно успевать за новой шиной. Делитель от XOSC-частоты —  
+  // безопасен и на 337 МГц, и на номинале.  
+  ssi_hw->baudr = 4;   // XIP clock = clk_sys / 4, как в версии до e62077a  
+  __dmb();  
   clk_sys_to_pll(target_clk_hz);  
   restore_interrupts(ints_status);  
-  unpark_core0(flag_mode);  
+  unpark_core0(flag_mode);
   quad_vfo_pll_dbg_stage = 5;  
   Serial.println("[PLL] dbg: switched");  Serial.flush();
 
 
 
-  
+
 
   bool     locked_ok = false;  
   uint32_t meas_hz   = 0;  
@@ -349,8 +357,10 @@ Serial.println("[PLL] dbg: before park");  Serial.flush();
     }  
     quad_vfo_pll_dbg_stage = 3;  
   
+    ssi_hw->baudr = 4;  
+    __dmb();  
     clk_sys_to_pll(target_clk_hz);  
-    quad_vfo_pll_dbg_stage = 4;  
+    quad_vfo_pll_dbg_stage = 4;
     restore_interrupts(ints2);  
     unpark_core0(flag_mode2);  
     quad_vfo_pll_dbg_stage = 5;  
