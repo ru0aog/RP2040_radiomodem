@@ -70,21 +70,31 @@ void setup() {
   
 void loop() {
 
-  // --- Разовый тест: перевести генератор в TX на 3650000 Гц и оставить ---  
-  static bool tx_started = false;  
-  if (!tx_started && millis() > 3000) {          // дать RX/USB подняться  
+
+  // --- Тест: TX на 3.65 МГц, перебор 4 тонов шагом 170 Гц каждые 500 мс ---  
+  static bool     tx_started = false;  
+  static uint32_t t_tone = 0;  
+  static uint8_t  tone_idx = 0;  
+  
+  if (!tx_started && millis() > 3000) {  
     tx_started = true;  
+    vfo_bank_set_grid(3650000UL, 170, 4);          // сетка ДО переключения  
     bool ok = trx_switch(TRX_TX, 3650000UL);  
     Serial.printf("[TEST] trx_switch(TX, 3650000) = %d\n", (int)ok);  
     if (ok) {  
-      vfo_bank_set_grid(3650000UL, 0, 1);         // 1 тон, шаг 0 → ровно 3.65 МГц  
-      vfo_tone(0);  
       soft_tx_debug();  
       Serial.printf("[TEST] actual=%lu Hz clk_sys=%lu Hz\n",  
                     (unsigned long)vfo_actual_hz(),  
                     (unsigned long)vfo_clk_sys_hz());  
     }  
   }  
+  
+  // Перебор тонов — только в TX  
+  if (tx_started && trx_state() == TRX_TX && millis() - t_tone > 500) {  
+    t_tone = millis();  
+    vfo_tone(tone_idx);  
+    tone_idx = (tone_idx + 1) % 4;  
+  }
 
   cat_poll();                       // CAT-команды (Kenwood TS-2000, второй CDC)    
   modem_poll();                     // Hayes-модем (КАРКАС)    
