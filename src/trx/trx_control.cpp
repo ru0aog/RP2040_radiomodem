@@ -72,9 +72,13 @@ volatile uint32_t core0_park_exit  = 0;
 // volatile-флагов и барьеры. Вся функция живёт в SRAM.  
 void __not_in_flash_func(core0_wait_in_ram)(void) {  
   ++core0_park_enter;  
-  core0_park_ack = true;  
-  __dmb();  
   while (core0_park_req) {  
+    // ack перевзводим на КАЖДОЙ итерации: Core 1 гасит ack перед  
+    // каждым новым req (park_core0), и если он успел это сделать,  
+    // пока мы уже сидели в __wfe, единичный ack при входе был бы  
+    // затёрт — парк повис бы навсегда.  
+    core0_park_ack = true;  
+    __dmb();  
     // Спим в SRAM, пока Core 1 переключает clk_sys/PLL.  
     // __wfe() — RAM-инструкция; просыпаемся по __sev() с Core 1,  
     // флаг перечитываем после пробуждения.  
@@ -83,7 +87,7 @@ void __not_in_flash_func(core0_wait_in_ram)(void) {
   core0_park_ack = false;  
   __dmb();  
   ++core0_park_exit;  
-}  
+}
   
 // ============================================================================  
 // WEAK-ЗАГЛУШКИ КОНВЕЙЕРОВ  
@@ -179,10 +183,6 @@ bool trx_switch(TrxState target, uint32_t freq_hz) {
     }  
   
     if (millis() - t0 > TRX_SWITCH_TIMEOUT_MS) {  
-      // НЕ сбрасываем s_req_active: Core 1, если жив, завершит  
-      // переход сам и выставит done/state корректно.  
-      // park-флаги на этой ветке не трогаем: если Core 1 завис  
-      // с поднятым req, снять его за него мы не можем безопасно.  
       Serial.printf("[TRX] switch timeout -> %s (%lu Hz), "  
                     "state=%d — core1 завис или VFO-скан слишком долгий\n",  
                     target == TRX_TX ? "TX" : "RX",  
@@ -191,7 +191,7 @@ bool trx_switch(TrxState target, uint32_t freq_hz) {
     }  
     tight_loop_contents();  
   }  
-  return (s_state == target);  
+  return (s_state == target);
 }  
   
 // ============================================================================  
