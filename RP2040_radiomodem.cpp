@@ -36,37 +36,50 @@ volatile bool core0_ready = false;
   
 void setup() {  
   Serial.begin(115200);  
- delay(2000);
-  while (!Serial && millis() < 5000) delay(1);
-
-  cat_init();                        // CAT на этом же порту
-
+  delay(2000);  
+  while (!Serial && millis() < 5000) delay(1);  
+  
+  cat_init();                        // CAT на этом же порту  
+  
   Serial.println();  
   Serial.println("RP2040_radiomodem — полудуплексный цифровой радиомодем");  
   Serial.println("====================================================");  
+  Serial.flush();  
   
+  Serial.println("[DBG] before mem_arena");  Serial.flush();  
   mem_arena_init();  
   Serial.printf("mem_arena: TRX pool %u B, SHARED %u B\n",  
                 (unsigned)mem_arena_capacity(MEM_PHASE_RX),  
                 (unsigned)mem_arena_capacity(MEM_PHASE_SHARED));  
+  Serial.flush();  
   
+  Serial.println("[DBG] before pins_init");   Serial.flush();  
   pins_init();  
+  Serial.println("[DBG] before vfo_init");    Serial.flush();  
   vfo_init();  
+  Serial.println("[DBG] before trx_init");    Serial.flush();  
   trx_init(vfo_on_trx_switch);      // hook VFO на события RX/TX  
   
-  // ---- Каркас приложения (заглушки — печатают [STUB], железа не трогают) ----  
+  // ---- Каркас приложения ----  
+  Serial.println("[DBG] before rx_dsp_init"); Serial.flush();  
   rx_dsp_init();  
+  Serial.println("[DBG] before decoders");    Serial.flush();  
   rx_decoders_init();  
+  Serial.println("[DBG] before rsid");        Serial.flush();  
   rsid_init();  
+  Serial.println("[DBG] before usb_audio");   Serial.flush();  
   usb_audio_init();  
+  Serial.println("[DBG] before modem");       Serial.flush();  
   modem_init();  
-  // --------------------------------------------------------------------------  
+  // ----------------------------  
   
+  Serial.println("[DBG] before vfo_debug");   Serial.flush();  
   vfo_debug_dump();                 // разовый снимок состояния  
   
   core0_ready = true;               // Core 1 может стартовать RX-генератор  
+  Serial.println("[DBG] setup done");         Serial.flush();  
   delay(200);                       // дать Core 1 дойти до quad_start  
-}  
+}
   
 void loop() {
 
@@ -162,18 +175,16 @@ void loop() {
 // ============================================================================  
 // Core 1 — хозяин реального времени  
 // ============================================================================  
-void setup1() {
-
-  while (!core0_ready) tight_loop_contents();  // ждём setup() на Core 0  
-
-  multicore_lockout_victim_init();   // до первого PLL-вызова на этом ядре  
-  
-  trx_poll_core1();                            // инициализация TRX на core1  
-  
-  // Старт RX-генератора сразу при загрузке: квадратурный LO (soft_rx, pio1)  
-  // на f_rx - RX_IF_SHIFT_HZ. Без явного вызова квад остаётся выключенным  
-  // до первого trx_switch.  
+void setup1() {  
+  while (!core0_ready) tight_loop_contents();  
+  Serial.println("[DBG] core1 alive");           Serial.flush();  
+  multicore_lockout_victim_init();  
+  Serial.println("[DBG] core1 victim ok");       Serial.flush();  
+  trx_poll_core1();  
+  Serial.println("[DBG] before vfo_on_trx");     Serial.flush();  
   vfo_on_trx_switch(TRX_RX, 14074000);  
+  Serial.println("[DBG] after vfo_on_trx");      Serial.flush();  
+
   delay(100);                       // пересинхронизация USB CDC + старт SM  
   vfo_quad_debug();                 // [LODBG] clkdiv/enabled/lo_hz
   cat_set_freq_hz(14074000);        // зеркало FA для ответов CAT (s_rx_hz)  
