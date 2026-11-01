@@ -261,61 +261,53 @@ bool __not_in_flash_func(quad_vfo_set_clk_sys)(
     vreg_set_voltage((vreg_voltage)vsel);  
     busy_wait_us(500);  
   }  
-  
-  // --- Парковочное окно: Serial запрещён до unpark_core0 ---  
-  Serial.println("[PLL] dbg: before park");  Serial.flush();  
+
+
+
+
+Serial.println("[PLL] dbg: before park");  Serial.flush();  
   quad_vfo_pll_dbg_stage = 0;  
   
   bool flag_mode = use_flag_park();  
-  if (!park_core0(flag_mode)) {  
-    // Без парковки в окно нельзя. Core 0 жив — выходим с провалом,  
-    // trx_switch сам сообщит о таймауте/ошибке.  
-    return false;  
-  }  
-  quad_vfo_pll_dbg_stage = 1;  
   
+  // Сегмент 1: detach_peri + xosc  
+  if (!park_core0(flag_mode)) return false;  
+  quad_vfo_pll_dbg_stage = 1;  
   detach_peri();  
   uint32_t ints_status = save_and_disable_interrupts();  
   clk_sys_to_xosc(xosc_hz);  
+  restore_interrupts(ints_status);  
+  unpark_core0(flag_mode);  
   quad_vfo_pll_dbg_stage = 2;  
+  Serial.println("[PLL] dbg: seg1 xosc ok");  Serial.flush();  
   
-  if (!pll_setup_bounded(cfg.refdiv, cfg.fbdiv, cfg.p1, cfg.p2)) {  
-    quad_vfo_pll_dbg_stage = 3;  
-    restore_interrupts(ints_status);  
-    unpark_core0(flag_mode);  
-    quad_vfo_pll_dbg_stage = 5;  
-  
-    Serial.println("[PLL] dbg: setup fail"); Serial.flush();  
+  // Сегмент 2: PLL setup  
+  if (!park_core0(flag_mode)) return false;  
+  ints_status = save_and_disable_interrupts();  
+  bool pll_ok = pll_setup_bounded(cfg.refdiv, cfg.fbdiv, cfg.p1, cfg.p2);  
+  restore_interrupts(ints_status);  
+  unpark_core0(flag_mode);  
+  quad_vfo_pll_dbg_stage = 3;  
+  Serial.printf("[PLL] dbg: seg2 pll ok=%d\n", (int)pll_ok);  Serial.flush();  
+  if (!pll_ok) {  
     bool rb = rollback_nominal(nominal, xosc_hz);  
     if (out_nominal_ok) *out_nominal_ok = rb;  
-    if (!is_oc) {  
-      busy_wait_us(100);  
-      vreg_set_voltage((vreg_voltage)vsel);  
-    }  
     return false;  
   }  
-  quad_vfo_pll_dbg_stage = 3;  
   
-  const uint32_t FLASH_SAFE_MAX_HZ = 48000000u;  
-  uint32_t ssi_baud =  
-      (uint32_t)((target_clk_hz + FLASH_SAFE_MAX_HZ - 1) /  
-                 FLASH_SAFE_MAX_HZ);  
-  ssi_baud = (ssi_baud + 1u) & ~1u;  
-  if (ssi_baud < 2u)  ssi_baud = 2u;  
-  if (ssi_baud > 34u) ssi_baud = 34u;  
-  ssi_hw->ssienr = 0;  
-  ssi_hw->baudr  = ssi_baud;  
-  ssi_hw->ssienr = 1;  
-  
+  // Сегмент 3: clk_sys -> PLL  
+  if (!park_core0(flag_mode)) return false;  
+  ints_status = save_and_disable_interrupts();  
   clk_sys_to_pll(target_clk_hz);  
-  quad_vfo_pll_dbg_stage = 4;  
   restore_interrupts(ints_status);  
   unpark_core0(flag_mode);  
   quad_vfo_pll_dbg_stage = 5;  
-  // --- Конец парковочного окна ---  
+  Serial.println("[PLL] dbg: switched");  Serial.flush();
+
+
+
   
-  Serial.println("[PLL] dbg: switched, verifying");  Serial.flush();  
-  
+
   bool     locked_ok = false;  
   uint32_t meas_hz   = 0;  
   const uint64_t expect_hz = cfg.clk_sys_hz;  
