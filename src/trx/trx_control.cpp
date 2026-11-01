@@ -40,11 +40,38 @@ static volatile TrxState s_pending      = TRX_RX;
 static volatile uint32_t s_pending_freq = 0;  
 static volatile bool     s_req_active   = false;  
 static volatile bool     s_req_done     = false;  
-// Core 0 ждёт завершения переключения в trx_switch() — уже спит  
-// в пустом цикле, парковать его через idleOtherCore не нужно.  
-// Читается из quad_vfo_pll.cpp (extern volatile bool).  
-volatile bool core0_in_trx_wait = false;
-
+  
+// Флаг-протокол парковки Core 0 на время переключения clk_sys.  
+//  
+// Проблема: и multicore_lockout_*, и rp2040.idleOtherCore используют  
+// handshake через SIO FIFO / lockout-механизм — внутри trx_switch-ожидания  
+// он зависает (Core 0 в wait-цикле не отвечает на парковочный запрос).  
+//  
+// Решение: Core 0 сам следит за core0_park_req в своём цикле ожидания.  
+// Увидев req, он выставляет core0_park_ack и уходит в RAM-резидентный  
+// цикл (функция __not_in_flash_func — иначе Core 0 умрёт на переключении  
+// шины, исполняя код из flash). Когда Core 1 сбрасывает req, Core 0  
+// выходит и продолжает ожидание trx_switch.  
+//  
+// Читается/пишется из quad_vfo_pll.cpp (extern volatile bool).  
+volatile bool core0_park_req = false;   // Core 1 → Core 0: "уйди в RAM"  
+volatile bool core0_park_ack = false;   // Core 0 → Core 1: "я в RAM, можно"  
+  
+// RAM-резидентное ожидание снятия park_req.  
+// ВНИМАНИЕ: внутри нельзя вызывать ничего из flash — только чтение/запись  
+// volatile-флагов и барьеры. Вся функция живёт в SRAM.  
+void __not_in_flash_func(core0_wait_in_ram)(void) {  
+  core0_park_ack = true;  
+  __dmb();  
+  while (core0_park_req) {  
+    // Спим в SRAM, пока Core 1 переключает clk_sys/PLL.  
+    // __wfe() — тоже RAM-инструкция, экономим на шине.  
+    __wfe();  
+  }  
+  core0_park_ack = false;  
+  __dmb();  
+}  
+  
 // ============================================================================  
 // WEAK-ЗАГЛУШКИ КОНВЕЙЕРОВ  
 // extern "C" — то же соглашение, что в заголовке: при появлении реальных  
@@ -60,19 +87,19 @@ __attribute__((weak)) void tx_pipeline_start(void) {}
 // ============================================================================  
 // ИНИЦИАЛИЗАЦИЯ (Core 0, из setup() ПОСЛЕ vfo_init())  
 // ============================================================================  
-void trx_init(TrxVfoHook vfo_hook) {
+void trx_init(TrxVfoHook vfo_hook) {  
   s_vfo         = vfo_hook;  
   s_state       = TRX_RX;  
   s_req_active  = false;  
   s_req_done    = false;  
-  mem_arena_init();
+  mem_arena_init();  
 }  
   
 // ============================================================================  
 // ОБРАБОТЧИК НА CORE 1 — дёргать каждую итерацию loop1()  
 // ============================================================================  
 void trx_poll_core1(void) {  
-  if (!s_req_active) return;
+  if (!s_req_active) return;  
   
   noInterrupts();  
   TrxState target   = s_pending;  
@@ -95,6 +122,8 @@ void trx_poll_core1(void) {
   // 3. VFO — до старта тракта, чтобы частота не уходила при живом  
   //    генераторе. Здесь же гашение старого генератора (полудуплекс).  
   //    МОЖЕТ ЗАНЯТЬ СОТНИ МС — PLL-скан clk_sys внутри движка.  
+  //    Пока Core 0 в ожидании trx_switch, парковка идёт флаг-протоколом  
+  //    (core0_park_req/ack), а не idleOtherCore.  
   if (s_vfo) s_vfo(target, freq);  
   
   // 4. Старт нового тракта.  
@@ -121,31 +150,31 @@ bool trx_switch(TrxState target, uint32_t freq_hz) {
   s_pending_freq = freq_hz;  
   s_pending      = target;  
   s_req_done     = false;  
-  // Флаг ДО публикации запроса: Core 1 может дойти до  
-  // quad_vfo_set_clk_sys → idleOtherCore раньше, чем мы попадём  
-  // в цикл ожидания. Core 0 с этого момента «номинально спит» —  
-  // парковать его во время PLL-окна нельзя.  
-  core0_in_trx_wait = true;  
-  __dmb();  
   s_req_active   = true;                   // публиковать последним  
+  __dmb();  
   
-  uint32_t t0 = millis(); 
+  uint32_t t0 = millis();  
   while (!s_req_done) {  
     if (millis() - t0 > TRX_SWITCH_TIMEOUT_MS) {  
       // НЕ сбрасываем s_req_active: Core 1, если жив, завершит  
       // переход сам и выставит done/state корректно.  
-      core0_in_trx_wait = false;  
+      // park-флаги на этой ветке не трогаем: если Core 1 завис  
+      // с поднятым req, снять его за него мы не можем безопасно.  
       Serial.printf("[TRX] switch timeout -> %s (%lu Hz), "  
                     "state=%d — core1 завис или VFO-скан слишком долгий\n",  
                     target == TRX_TX ? "TX" : "RX",  
                     (unsigned long)freq_hz, (int)s_state);  
       return false;  
     }  
+    // Парковка по флаг-протоколу: Core 1 просит уйти в RAM-цикл  
+    // на время переключения clk_sys. Отвечаем сами — без handshake  
+    // через idleOtherCore, который здесь зависал.  
+    if (core0_park_req) {  
+      core0_wait_in_ram();              // вернётся после unpark  
+    }  
     tight_loop_contents();  
   }  
-  core0_in_trx_wait = false;  
-  __dmb();  
-  return (s_state == target);
+  return (s_state == target);  
 }  
   
 // ============================================================================  

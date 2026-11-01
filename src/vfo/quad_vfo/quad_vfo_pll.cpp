@@ -11,12 +11,22 @@
 //   PRIM: POSTDIV1|POSTDIV2  
 //   PWR: POSTDIVPD = 0  
 //  
-// Core 0 ВСЕГДА паркуется (rp2040.idleOtherCore) на время переключения  
-// clk_sys: диагностикой подтверждено — без парковки Core 0 не переживает  
-// смену шины под ногами (flash-код + запросы к XIP).  
-// ВНУТРИ парковочных окон Serial/printf ЗАПРЕЩЁН: CDC обслуживается Core 0,  
-// printf при припаркованном ядре — дедлок. Диагностика — только  
-// SRAM-флаги (quad_vfo_pll_dbg_stage).  
+// Парковка Core 0 на время переключения clk_sys — ОБЯЗАТЕЛЬНА:  
+// диагностикой подтверждено, что без парковки Core 0 не переживает  
+// смену шины (flash-код + XIP).  
+//  
+// Два механизма парковки:  
+//   1. Флаг-протокол (Core 1, core1_pll_done=true): Core 0 уже ждёт  
+//      в RAM-цикле core0_wait_in_ram() внутри trx_switch — мы только  
+//      взводим core0_park_req и ждём core0_park_ack. Никакого  
+//      handshake: idleOtherCore в этом состоянии висел (Core 0 не  
+//      обслуживает lockout-IRQ из tight wait).  
+//   2. idleOtherCore (старт до core1_pll_done, вызовы с Core 0) —  
+//      доказанно работает, т.к. Core 0 в "чистом" ожидании.  
+//  
+// ВНУТРИ парковочных окон Serial/printf ЗАПРЕЩЁН: CDC обслуживается  
+// Core 0, printf при припаркованном ядре — дедлок. Диагностика —  
+// только SRAM-флаги (quad_vfo_pll_dbg_stage).  
 #include "quad_vfo_pll.h"  
 #include "hardware/clocks.h"  
 #include "hardware/pll.h"  
@@ -37,16 +47,50 @@ static bool s_pll_quiet = false;
 #define QP_LOG(...)  do { if (!s_pll_quiet) Serial.printf(__VA_ARGS__); } while (0)  
 void quad_vfo_pll_set_quiet(bool on) { s_pll_quiet = on; }  
   
+// --- Протокол парковки Core 0 ------------------------------------  
+// core0_park_req/core0_park_ack — из src/trx/trx_control.cpp:  
+// Core 0 в trx_switch-ожидании крутит core0_wait_in_ram() и  
+// подтверждает уход в RAM записью ack.  
+// core1_pll_done — из скетча: true после первого quad_start в setup1.  
+extern volatile bool core0_park_req;  
+extern volatile bool core0_park_ack;  
+extern volatile bool core1_pll_done;  
+  
 // Диагностический счётчик стадий внутри парковочных окон.  
 // Живёт в SRAM, безопасен при припаркованном Core 0 и выключенных IRQ.  
 // Читать после зависания через отладчик/дамп:  
 //   0 — функция не входила в окно  
-//   1 — после idleOtherCore (парковка прошла)  
+//   1 — после park (Core 0 в RAM)  
 //   2 — после clk_sys_to_xosc  
 //   3 — после pll_setup_bounded  
-//   4 — после clk_sys_to_pll (перед resume)  
-//   5 — после resumeOtherCore  
+//   4 — после clk_sys_to_pll (перед unpark)  
+//   5 — после unpark  
 volatile uint32_t quad_vfo_pll_dbg_stage = 0;  
+  
+// true → флаг-протокол; false → rp2040.idleOtherCore().  
+static bool __not_in_flash_func(use_flag_park)(void) {  
+  return (get_core_num() == 1) && core1_pll_done;  
+}  
+  
+// Парковка Core 0. Возврата нет, пока ядро не в RAM-цикле.  
+static void __not_in_flash_func(park_core0)(bool flag_mode) {  
+  if (flag_mode) {  
+    core0_park_req = true;  
+    __dmb();  
+    while (!core0_park_ack) { }  
+  } else {  
+    rp2040.idleOtherCore();  
+  }  
+}  
+  
+static void __not_in_flash_func(unpark_core0)(bool flag_mode) {  
+  if (flag_mode) {  
+    core0_park_req = false;             // Core 0 выйдет из wait_in_ram сам  
+    __dmb();  
+  } else {  
+    rp2040.resumeOtherCore();  
+  }  
+}  
   
 uint32_t quad_vfo_clk_sys_hz(void) { return s_clk_sys_hz; }  
   
@@ -117,11 +161,12 @@ static bool __not_in_flash_func(pll_setup_bounded)(uint32_t refdiv,
   
 // true: nominal profile acquired and clk_sys switched to PLL.  
 // false: LOCK was not acquired; clk_sys stays on XOSC.  
-// Парковка безусловная; внутри окна — только SRAM-стадии, без Serial.  
+// Парковка обязательна; внутри окна — только SRAM-стадии, без Serial.  
 static bool __not_in_flash_func(rollback_nominal)(  
     const quad_vfo_pll_t *nominal, uint64_t xosc_hz) {  
   quad_vfo_pll_dbg_stage = 0;  
-  rp2040.idleOtherCore();  
+  bool flag_mode = use_flag_park();  
+  park_core0(flag_mode);  
   quad_vfo_pll_dbg_stage = 1;  
   
   uint32_t ints = save_and_disable_interrupts();  
@@ -139,7 +184,7 @@ static bool __not_in_flash_func(rollback_nominal)(
   }  
   quad_vfo_pll_dbg_stage = 4;  
   restore_interrupts(ints);  
-  rp2040.resumeOtherCore();  
+  unpark_core0(flag_mode);  
   quad_vfo_pll_dbg_stage = 5;  
   
   if (!ok) {  
@@ -173,8 +218,9 @@ bool __not_in_flash_func(quad_vfo_set_clk_sys)(
                  ((uint64_t)cfg.refdiv * cfg.p1 * cfg.p2));  
   bool is_oc = (target_clk_hz > s_clk_sys_hz);  
   
-  Serial.printf("[PLL] dbg: entry target=%lu oc=%d\n",  
-                (unsigned long)target_clk_hz, (int)is_oc);  
+  Serial.printf("[PLL] dbg: entry target=%lu oc=%d flag=%d\n",  
+                (unsigned long)target_clk_hz, (int)is_oc,  
+                (int)use_flag_park());  
   Serial.flush();  
   
   if (is_oc) {  
@@ -182,11 +228,12 @@ bool __not_in_flash_func(quad_vfo_set_clk_sys)(
     busy_wait_us(500);  
   }  
   
-  // --- Парковочное окно: Serial запрещён до resumeOtherCore ---  
+  // --- Парковочное окно: Serial запрещён до unpark_core0 ---  
   Serial.println("[PLL] dbg: before park");  Serial.flush();  
   quad_vfo_pll_dbg_stage = 0;  
   
-  rp2040.idleOtherCore();  
+  bool flag_mode = use_flag_park();  
+  park_core0(flag_mode);  
   quad_vfo_pll_dbg_stage = 1;  
   
   detach_peri();  
@@ -197,7 +244,7 @@ bool __not_in_flash_func(quad_vfo_set_clk_sys)(
   if (!pll_setup_bounded(cfg.refdiv, cfg.fbdiv, cfg.p1, cfg.p2)) {  
     quad_vfo_pll_dbg_stage = 3;  
     restore_interrupts(ints_status);  
-    rp2040.resumeOtherCore();  
+    unpark_core0(flag_mode);  
     quad_vfo_pll_dbg_stage = 5;  
   
     Serial.println("[PLL] dbg: setup fail"); Serial.flush();  
@@ -225,7 +272,7 @@ bool __not_in_flash_func(quad_vfo_set_clk_sys)(
   clk_sys_to_pll(target_clk_hz);  
   quad_vfo_pll_dbg_stage = 4;  
   restore_interrupts(ints_status);  
-  rp2040.resumeOtherCore();  
+  unpark_core0(flag_mode);  
   quad_vfo_pll_dbg_stage = 5;  
   // --- Конец парковочного окна ---  
   
@@ -251,7 +298,8 @@ bool __not_in_flash_func(quad_vfo_set_clk_sys)(
     Serial.printf("[PLL] dbg: retry %d\n", attempt);  Serial.flush();  
     quad_vfo_pll_dbg_stage = 0;  
   
-    rp2040.idleOtherCore();  
+    bool flag_mode2 = use_flag_park();  
+    park_core0(flag_mode2);  
     quad_vfo_pll_dbg_stage = 1;  
   
     uint32_t ints2 = save_and_disable_interrupts();  
@@ -261,7 +309,7 @@ bool __not_in_flash_func(quad_vfo_set_clk_sys)(
     if (!pll_setup_bounded(cfg.refdiv, cfg.fbdiv, cfg.p1, cfg.p2)) {  
       quad_vfo_pll_dbg_stage = 3;  
       restore_interrupts(ints2);  
-      rp2040.resumeOtherCore();  
+      unpark_core0(flag_mode2);  
       quad_vfo_pll_dbg_stage = 5;  
       break;  
     }  
@@ -270,7 +318,7 @@ bool __not_in_flash_func(quad_vfo_set_clk_sys)(
     clk_sys_to_pll(target_clk_hz);  
     quad_vfo_pll_dbg_stage = 4;  
     restore_interrupts(ints2);  
-    rp2040.resumeOtherCore();  
+    unpark_core0(flag_mode2);  
     quad_vfo_pll_dbg_stage = 5;  
   }  
   
