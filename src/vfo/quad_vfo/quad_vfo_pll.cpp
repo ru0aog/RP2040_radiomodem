@@ -127,89 +127,97 @@ static bool __not_in_flash_func(rollback_nominal)(
   return ok;
 }
 
-bool __not_in_flash_func(quad_vfo_set_clk_sys)(
-    const quad_vfo_pll_t *cfg_in, uint32_t vsel,
-    const quad_vfo_pll_t *nominal, uint64_t xosc_hz,
-    bool *out_nominal_ok) {
-
-  if (out_nominal_ok) *out_nominal_ok = false;
-  if (!cfg_in || !nominal || xosc_hz == 0) return false;
-
-  quad_vfo_pll_t cfg = *cfg_in;
-  if (cfg.refdiv == 0) cfg.refdiv = 1;
-  // p1=1 недокументированно делит пополам на VCO < ~2.8 ГГц — отклоняем.
-  if (cfg.p1 < 2) cfg = *nominal;
-
-  if (cfg.p1 < 2 || cfg.p2 < 1 || cfg.refdiv < 1 ||
-      cfg.fbdiv < 16 || cfg.fbdiv > 320 || cfg.clk_sys_hz == 0) {
-    bool rb = rollback_nominal(nominal, xosc_hz);
-    if (out_nominal_ok) *out_nominal_ok = rb;
-    return false;
-  }
-
-  uint32_t target_clk_hz =
-      (uint32_t)(((uint64_t)cfg.fbdiv * xosc_hz) /
-                 ((uint64_t)cfg.refdiv * cfg.p1 * cfg.p2));
-  bool is_oc = (target_clk_hz > s_clk_sys_hz);
-
-  if (is_oc) {
-    vreg_set_voltage((vreg_voltage)vsel);
-    busy_wait_us(500);
-  }
-
+bool __not_in_flash_func(quad_vfo_set_clk_sys)(  
+    const quad_vfo_pll_t *cfg_in, uint32_t vsel,  
+    const quad_vfo_pll_t *nominal, uint64_t xosc_hz,  
+    bool *out_nominal_ok) {  
+  
+  if (out_nominal_ok) *out_nominal_ok = false;  
+  if (!cfg_in || !nominal || xosc_hz == 0) return false;  
+  
+  quad_vfo_pll_t cfg = *cfg_in;  
+  if (cfg.refdiv == 0) cfg.refdiv = 1;  
+  if (cfg.p1 < 2) cfg = *nominal;  
+  
+  if (cfg.p1 < 2 || cfg.p2 < 1 || cfg.refdiv < 1 ||  
+      cfg.fbdiv < 16 || cfg.fbdiv > 320 || cfg.clk_sys_hz == 0) {  
+    bool rb = rollback_nominal(nominal, xosc_hz);  
+    if (out_nominal_ok) *out_nominal_ok = rb;  
+    return false;  
+  }  
+  
+  uint32_t target_clk_hz =  
+      (uint32_t)(((uint64_t)cfg.fbdiv * xosc_hz) /  
+                 ((uint64_t)cfg.refdiv * cfg.p1 * cfg.p2));  
+  bool is_oc = (target_clk_hz > s_clk_sys_hz);  
+  
+  Serial.printf("[PLL] dbg: entry target=%lu oc=%d wait=%d\n",  
+                (unsigned long)target_clk_hz, (int)is_oc,  
+                (int)core0_in_trx_wait);  
+  Serial.flush();  
+  
+  if (is_oc) {  
+    vreg_set_voltage((vreg_voltage)vsel);  
+    busy_wait_us(500);  
+  }  
+  
+  Serial.println("[PLL] dbg: before park");  Serial.flush();  
   bool parked = !core0_in_trx_wait;  
-  if (parked) rp2040.idleOtherCore();      // Core 0 спит в trx_switch —  
-  detach_peri();                           // без парковки; иначе — паркуем  
+  if (parked) rp2040.idleOtherCore();  
+  
+  Serial.println("[PLL] dbg: parked");       Serial.flush();  
+  detach_peri();  
   uint32_t ints_status = save_and_disable_interrupts();  
   clk_sys_to_xosc(xosc_hz);  
   
   if (!pll_setup_bounded(cfg.refdiv, cfg.fbdiv, cfg.p1, cfg.p2)) {  
     restore_interrupts(ints_status);  
     if (parked) rp2040.resumeOtherCore();  
-    bool rb = rollback_nominal(nominal, xosc_hz);
-    if (out_nominal_ok) *out_nominal_ok = rb;
-    if (!is_oc) {
-      busy_wait_us(100);
-      vreg_set_voltage((vreg_voltage)vsel);
-    }
-    return false;
-  }
-
-  // SSI BAUDR: такт флэша <= 48 МГц, чётный делитель 2..34.
-  const uint32_t FLASH_SAFE_MAX_HZ = 48000000u;
-  uint32_t ssi_baud =
-      (uint32_t)((target_clk_hz + FLASH_SAFE_MAX_HZ - 1) /
-                 FLASH_SAFE_MAX_HZ);
-  ssi_baud = (ssi_baud + 1u) & ~1u;
-  if (ssi_baud < 2u)  ssi_baud = 2u;
-  if (ssi_baud > 34u) ssi_baud = 34u;
-  ssi_hw->ssienr = 0;
-  ssi_hw->baudr  = ssi_baud;
-  ssi_hw->ssienr = 1;
-
+    Serial.println("[PLL] dbg: setup fail"); Serial.flush();  
+    bool rb = rollback_nominal(nominal, xosc_hz);  
+    if (out_nominal_ok) *out_nominal_ok = rb;  
+    if (!is_oc) {  
+      busy_wait_us(100);  
+      vreg_set_voltage((vreg_voltage)vsel);  
+    }  
+    return false;  
+  }  
+  
+  const uint32_t FLASH_SAFE_MAX_HZ = 48000000u;  
+  uint32_t ssi_baud =  
+      (uint32_t)((target_clk_hz + FLASH_SAFE_MAX_HZ - 1) /  
+                 FLASH_SAFE_MAX_HZ);  
+  ssi_baud = (ssi_baud + 1u) & ~1u;  
+  if (ssi_baud < 2u)  ssi_baud = 2u;  
+  if (ssi_baud > 34u) ssi_baud = 34u;  
+  ssi_hw->ssienr = 0;  
+  ssi_hw->baudr  = ssi_baud;  
+  ssi_hw->ssienr = 1;  
+  
   clk_sys_to_pll(target_clk_hz);  
   restore_interrupts(ints_status);  
-  if (parked) rp2040.resumeOtherCore();    // шина на новом PLL — ядро отпускаем
+  if (parked) rp2040.resumeOtherCore();  
+  
+  Serial.println("[PLL] dbg: switched, verifying");  Serial.flush();  
   
   bool     locked_ok = false;  
   uint32_t meas_hz   = 0;  
-  // Верификация в герцах: expect*1003 в u64 — u32 переполнится  
-  // уже при ~4,2 МГц. Окно ±0,3% прежнее.  
   const uint64_t expect_hz = cfg.clk_sys_hz;  
   
-for (int attempt = 0; attempt < 3; attempt++) {  
+  for (int attempt = 0; attempt < 3; attempt++) {  
     busy_wait_us(300);  
-    meas_hz = meas_clk_sys_hz();
+    meas_hz = meas_clk_sys_hz();  
     QP_LOG("[PLL] attempt %d: meas=%lu Hz expect=%llu Hz\n",  
                   attempt, (unsigned long)meas_hz,  
                   (unsigned long long)expect_hz);  
     if ((uint64_t)meas_hz * 1000ull > expect_hz * 997ull &&  
-        (uint64_t)meas_hz * 1000ull < expect_hz * 1003ull) {
+        (uint64_t)meas_hz * 1000ull < expect_hz * 1003ull) {  
       locked_ok = true;  
       break;  
-    }
-
-  bool parked2 = !core0_in_trx_wait;  
+    }  
+  
+    Serial.printf("[PLL] dbg: retry %d\n", attempt);  Serial.flush();  
+    bool parked2 = !core0_in_trx_wait;  
     if (parked2) rp2040.idleOtherCore();  
     uint32_t ints2 = save_and_disable_interrupts();  
     clk_sys_to_xosc(xosc_hz);  
@@ -221,22 +229,25 @@ for (int attempt = 0; attempt < 3; attempt++) {
     clk_sys_to_pll(target_clk_hz);  
     restore_interrupts(ints2);  
     if (parked2) rp2040.resumeOtherCore();  
-  }
-
-  if (!locked_ok) {
-    bool rb = rollback_nominal(nominal, xosc_hz);
-    if (out_nominal_ok) *out_nominal_ok = rb;
-    if (!is_oc) {
-      busy_wait_us(100);
-      vreg_set_voltage((vreg_voltage)vsel);
-    }
-    return false;
-  }
-
-  if (!is_oc) {
-    busy_wait_us(100);
-    vreg_set_voltage((vreg_voltage)vsel);
-  }
-  s_clk_sys_hz = meas_hz;              // измеренная реальность, Гц  
-  return true;
+  }  
+  
+  if (!locked_ok) {  
+    Serial.println("[PLL] dbg: no lock -> rollback");  Serial.flush();  
+    bool rb = rollback_nominal(nominal, xosc_hz);  
+    if (out_nominal_ok) *out_nominal_ok = rb;  
+    if (!is_oc) {  
+      busy_wait_us(100);  
+      vreg_set_voltage((vreg_voltage)vsel);  
+    }  
+    return false;  
+  }  
+  
+  if (!is_oc) {  
+    busy_wait_us(100);  
+    vreg_set_voltage((vreg_voltage)vsel);  
+  }  
+  Serial.printf("[PLL] dbg: done meas=%lu\n", (unsigned long)meas_hz);  
+  Serial.flush();  
+  s_clk_sys_hz = meas_hz;  
+  return true;  
 }

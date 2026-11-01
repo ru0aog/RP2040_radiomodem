@@ -75,6 +75,8 @@ void setup() {
   Serial.println("[DBG] after usb_audio");   Serial.flush();    
     
   vfo_debug_dump();                  // разовый снимок состояния    
+
+  pinMode(LED_BUILTIN, OUTPUT);
     
   // Отпускаем Core 1: он перенастроит clk_sys → 337.5 МГц, паркуя Core 0    
   // через idleOtherCore. В это время мы в пустом цикле ожидания —    
@@ -87,77 +89,86 @@ void setup() {
   Serial.flush();    
 }    
     
-void loop() {    
-    
-  // --- Тест: TX на 3.65 МГц, перебор 4 тонов шагом 170 Гц каждые 500 мс ---    
-  static bool     tx_started = false;    
-  static uint32_t t_tone = 0;    
-  static uint8_t  tone_idx = 0;    
-    
-  if (!tx_started && millis() > 3000) {    
-    tx_started = true;    
-    vfo_bank_set_grid(3650000UL, 170, 4);          // сетка ДО переключения    
-    bool ok = trx_switch(TRX_TX, 3650000UL);    
-    Serial.printf("[TEST] trx_switch(TX, 3650000) = %d\n", (int)ok);    
-    if (ok) {    
-      soft_tx_debug();    
-      Serial.printf("[TEST] actual=%lu Hz clk_sys=%lu Hz\n",    
-                    (unsigned long)vfo_actual_hz(),    
-                    (unsigned long)vfo_clk_sys_hz());    
-    }    
-  }    
-    
-  // Перебор тонов — только в TX    
-  if (tx_started && trx_state() == TRX_TX && millis() - t_tone > 500) {    
-    t_tone = millis();    
-    vfo_tone(tone_idx);    
-    tone_idx = (tone_idx + 1) % 4;    
-  }    
-    
-  // Возврат в RX через 10 с TX — проверка разгонной шины и перезахвата quad-LO    
-  static uint32_t t_tx_start = 0;    
-  if (tx_started && trx_state() == TRX_TX) {    
-    if (!t_tx_start) t_tx_start = millis();    
-    if (millis() - t_tx_start > 10000) {    
-      t_tx_start = 0;    
-      bool ok = trx_switch(TRX_RX, 14074000UL);    
-      Serial.printf("[TEST] trx_switch(RX) = %d clk_sys=%lu\n",    
-                    (int)ok, (unsigned long)vfo_clk_sys_hz());    
-      tx_started = false;          // для повтора цикла — сбросить и дать restart    
-    }    
-  }    
-    
-  cat_poll();                        // CAT-команды (Kenwood TS-2000)    
-  modem_poll();                      // Hayes-модем    
-  rx_decoders_poll();                // декодеры/RSID    
-  rsid_poll();    
-  usb_audio_poll();    
-  vfo_thermal_guard();    
-    
-  // Периодическая диагностика: водяной знак арены + состояние.    
-  static uint32_t t_diag = 0;    
-  if (millis() - t_diag > 10000) {    
-    t_diag = millis();    
-    Serial.printf("arena watermark: %u / %u B | state=%s | tone=%u | clk_sys=%lu Hz\n",    
-                  (unsigned)mem_arena_watermark(),    
-                  (unsigned)mem_arena_capacity(MEM_PHASE_RX),    
-                  trx_state() == TRX_TX ? "TX" :    
-                  trx_state() == TRX_RX ? "RX" : "SWITCHING",    
-                  (unsigned)vfo_tone_active(),    
-                  (unsigned long)vfo_clk_sys_hz());    
-    static uint32_t t_rxdbg = 0;    
-    if (millis() - t_rxdbg > 30000) {    
-      t_rxdbg = millis();    
-      rx_dsp_debug();    
-    }    
-    Serial.printf("cap_isr=%lu drop=%lu(scratch=%lu qfull=%lu busy=%lu) ",    
-                  (unsigned long)rx_cap_isr_count,    
-                  (unsigned long)rx_capture_dropped(),    
-                  (unsigned long)rx_drop_scratch,    
-                  (unsigned long)rx_drop_queue_full,    
-                  (unsigned long)rx_drop_busy);    
-  }    
-}    
+void loop() {  
+  
+  // --- Маячок живости: 2 Гц. Замёрз — прошивка умерла, мигает — мёртв только вывод.  
+  static uint32_t t_blink = 0;  
+  static bool     led = false;  
+  if (millis() - t_blink > 250) {  
+    t_blink = millis();  
+    led = !led;  
+    digitalWrite(LED_BUILTIN, led);  
+  }  
+  
+  // --- Тест: TX на 3.65 МГц, перебор 4 тонов шагом 170 Гц каждые 500 мс ---  
+  static bool     tx_started = false;  
+  static uint32_t t_tone = 0;  
+  static uint8_t  tone_idx = 0;  
+  
+  if (!tx_started && millis() > 3000) {  
+    tx_started = true;  
+    vfo_bank_set_grid(3650000UL, 170, 4);          // сетка ДО переключения  
+    bool ok = trx_switch(TRX_TX, 3650000UL);  
+    Serial.printf("[TEST] trx_switch(TX, 3650000) = %d\n", (int)ok);  
+    if (ok) {  
+      soft_tx_debug();  
+      Serial.printf("[TEST] actual=%lu Hz clk_sys=%lu Hz\n",  
+                    (unsigned long)vfo_actual_hz(),  
+                    (unsigned long)vfo_clk_sys_hz());  
+    }  
+  }  
+  
+  // Перебор тонов — только в TX  
+  if (tx_started && trx_state() == TRX_TX && millis() - t_tone > 500) {  
+    t_tone = millis();  
+    vfo_tone(tone_idx);  
+    tone_idx = (tone_idx + 1) % 4;  
+  }  
+  
+  // Возврат в RX через 10 с TX — проверка разгонной шины и перезахвата quad-LO  
+  static uint32_t t_tx_start = 0;  
+  if (tx_started && trx_state() == TRX_TX) {  
+    if (!t_tx_start) t_tx_start = millis();  
+    if (millis() - t_tx_start > 10000) {  
+      t_tx_start = 0;  
+      bool ok = trx_switch(TRX_RX, 14074000UL);  
+      Serial.printf("[TEST] trx_switch(RX) = %d clk_sys=%lu\n",  
+                    (int)ok, (unsigned long)vfo_clk_sys_hz());  
+      tx_started = false;          // для повтора цикла — сбросить и дать restart  
+    }  
+  }  
+  
+  cat_poll();                        // CAT-команды (Kenwood TS-2000)  
+  modem_poll();                      // Hayes-модем  
+  rx_decoders_poll();                // декодеры/RSID  
+  rsid_poll();  
+  usb_audio_poll();  
+  vfo_thermal_guard();  
+  
+  // Периодическая диагностика: водяной знак арены + состояние.  
+  static uint32_t t_diag = 0;  
+  if (millis() - t_diag > 10000) {  
+    t_diag = millis();  
+    Serial.printf("arena watermark: %u / %u B | state=%s | tone=%u | clk_sys=%lu Hz\n",  
+                  (unsigned)mem_arena_watermark(),  
+                  (unsigned)mem_arena_capacity(MEM_PHASE_RX),  
+                  trx_state() == TRX_TX ? "TX" :  
+                  trx_state() == TRX_RX ? "RX" : "SWITCHING",  
+                  (unsigned)vfo_tone_active(),  
+                  (unsigned long)vfo_clk_sys_hz());  
+    static uint32_t t_rxdbg = 0;  
+    if (millis() - t_rxdbg > 30000) {  
+      t_rxdbg = millis();  
+      rx_dsp_debug();  
+    }  
+    Serial.printf("cap_isr=%lu drop=%lu(scratch=%lu qfull=%lu busy=%lu) ",  
+                  (unsigned long)rx_cap_isr_count,  
+                  (unsigned long)rx_capture_dropped(),  
+                  (unsigned long)rx_drop_scratch,  
+                  (unsigned long)rx_drop_queue_full,  
+                  (unsigned long)rx_drop_busy);  
+  }  
+}
     
 // ============================================================================    
 // Core 1 — хозяин реального времени    
