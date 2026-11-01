@@ -36,7 +36,7 @@ volatile bool core0_ready = false;
   
 void setup() {  
   Serial.begin(115200);  
- 
+ delay(2000);
   while (!Serial && millis() < 5000) delay(1);
 
   cat_init();                        // CAT на этом же порту
@@ -162,8 +162,11 @@ void loop() {
 // ============================================================================  
 // Core 1 — хозяин реального времени  
 // ============================================================================  
-void setup1() {  
+void setup1() {
+
   while (!core0_ready) tight_loop_contents();  // ждём setup() на Core 0  
+
+  multicore_lockout_victim_init();   // до первого PLL-вызова на этом ядре  
   
   trx_poll_core1();                            // инициализация TRX на core1  
   

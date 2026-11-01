@@ -56,13 +56,13 @@ __attribute__((weak)) void tx_pipeline_start(void) {}
 // ============================================================================  
 // ИНИЦИАЛИЗАЦИЯ (Core 0, из setup() ПОСЛЕ vfo_init())  
 // ============================================================================  
-void trx_init(TrxVfoHook vfo_hook) {  
+void trx_init(TrxVfoHook vfo_hook) {
+  multicore_lockout_victim_init();   // Core 0 = жертва lockout от Core 1  
   s_vfo         = vfo_hook;  
   s_state       = TRX_RX;  
   s_req_active  = false;  
   s_req_done    = false;  
   mem_arena_init();
-  multicore_lockout_victim_init();   // Core 0 как victim — до любых set_clk_sys
 }  
   
 // ============================================================================  
