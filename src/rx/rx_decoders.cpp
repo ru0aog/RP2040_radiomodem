@@ -52,7 +52,7 @@ static void stop_active_decoder(void) {
         case MODE_RTTY:   rtty_rx_stop();   break;  
         case MODE_OLIVIA: olivia_rx_stop(); break;
         case MODE_CONTESTIA: contestia_rx_stop(); break;
-        case RX_MODE_JTTY:     jtty_rx_stop(); break;
+        case MODE_JTTY:        jtty_rx_stop(); break;
         default: break;  
     }  
 }  
