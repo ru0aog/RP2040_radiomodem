@@ -41,6 +41,11 @@
 // ============================================================================    
 volatile bool core0_ready    = false;    
 volatile bool core1_pll_done = false;    
+
+// Флаг-протокол парковки Core 0 — объекты определены в src/trx/trx_control.cpp.  
+// Core 0 обслуживает их в while(!core1_pll_done) и в trx_switch-ожидании.  
+extern volatile bool core0_park_req;  
+extern void core0_wait_in_ram(void);
     
 void setup() {    
   Serial.begin(115200);    
@@ -77,7 +82,12 @@ void setup() {
   // TinyUSB/CDC-активности, единственная безопасная точка парковки.  
   // UAC после этого поднимается уже на стабильной шине и без реэнумерации.  
   core0_ready = true;  
-  while (!core1_pll_done) tight_loop_contents();  
+  while (!core1_pll_done) {  
+    if (core0_park_req) {       // Core 1 просит уйти в RAM на время clk_sys  
+      core0_wait_in_ram();    // флаги/функция из trx_control.cpp  
+    }  
+    tight_loop_contents();  
+  }
   
   Serial.println("[DBG] before usb_audio");  Serial.flush();  
   usb_audio_init();  
@@ -181,6 +191,8 @@ void setup1() {
   vfo_on_trx_switch(TRX_RX, 14074000);    
     
   core1_pll_done = true;             // Core 0 может выйти из ожидания    
+
+
     
   delay(100);                        // старт SM    
   vfo_quad_debug();                  // [LODBG] clkdiv/enabled/lo_hz    

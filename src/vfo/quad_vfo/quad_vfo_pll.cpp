@@ -61,7 +61,7 @@ extern volatile bool     core0_park_ack;
 extern volatile uint32_t core0_park_enter;  
 extern volatile uint32_t core0_park_exit;  
 extern volatile uint32_t core0_loop_seen;  
-extern volatile bool     core1_pll_done;  
+//extern volatile bool     core1_pll_done;  
   
 // Диагностический счётчик стадий внутри парковочных окон.  
 // Живёт в SRAM, безопасен при припаркованном Core 0 и выключенных IRQ.  
@@ -75,8 +75,11 @@ volatile uint32_t quad_vfo_pll_dbg_stage = 0;
   
 // true → флаг-протокол; false → rp2040.idleOtherCore().  
 static bool __not_in_flash_func(use_flag_park)(void) {  
-  return (get_core_num() == 1) && core1_pll_done;  
-}  
+  // Флаг-протокол — всегда, когда вызов с Core 1: Core 0 в этот  
+  // момент гарантированно в одном из двух wait-циклов —  
+  // while(!core1_pll_done) на старте или trx_switch-ожидании.  
+  return (get_core_num() == 1);  
+}
   
 // Парковка Core 0. true — ack получен, Core 0 в RAM-цикле.  
 // false — timeout: печатаем состояние протокола и уходим, без парковки  
