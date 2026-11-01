@@ -44,8 +44,13 @@ volatile bool core1_pll_done = false;
 // ============================================================================  
 // SETUP — Core 0  
 // ============================================================================  
-void setup() {  
-  Serial.begin(115200);  
+void setup() {
+
+  usb_audio_init();            // регистрируем UAC-интерфейс ДО mount  
+
+  Serial.begin(115200);
+
+  while (!Serial && millis() < 5000) delay(1);
   
   Serial.println("[CAT] init: shared CDC port");  
   Serial.println();  
@@ -87,10 +92,6 @@ void setup() {
     core0_park_poll();  
     tight_loop_contents();  
   }  
-  
-  Serial.println("[DBG] before usb_audio");  
-  usb_audio_init();                          // UAC — ПОСЛЕ PLL-окна  
-  Serial.println("[DBG] after usb_audio");  
   
   Serial.println("[DBG] setup done");  
   Serial.flush();  
