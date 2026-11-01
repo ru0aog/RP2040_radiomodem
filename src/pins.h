@@ -42,8 +42,8 @@ extern int subband_pins[4];
 #define PIN_USR_BUTTON   22    // из receiver: PIN_USR_BUTTON  
   
 // ---------- I2C (Si5351, BME280, LCD) ----------  
-#define PIN_I2C_SDA       4  
-#define PIN_I2C_SCL       5  
+#define PIN_I2C_SDA      12  
+#define PIN_I2C_SCL      13  
   
 // ---------- PTT / ключ ----------  
 #define PIN_PTT_LED      25    // встроенный LED = индикация TX  

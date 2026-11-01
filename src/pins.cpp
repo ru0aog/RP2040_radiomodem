@@ -4,7 +4,7 @@
 // когда появится файловый менеджер, до pins_init().  
 #include "pins.h"  
   
-int pin_freq_out       = 2;              // TX-меандр (soft_tx, PIO0)  
+int pin_freq_out       = 5;              // TX-меандр (soft_tx, PIO0)  
 int subband_pins[4]    = { 6, 7, 8, 9 }; // ДПФ/субдиапазонный код  
   
 void pins_init() {  
