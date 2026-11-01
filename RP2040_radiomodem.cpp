@@ -96,6 +96,19 @@ void loop() {
     tone_idx = (tone_idx + 1) % 4;  
   }
 
+// Возврат в RX через 10 с TX — проверка разгонной шины и перезахвата quad-LO  
+  static uint32_t t_tx_start = 0;  
+  if (tx_started && trx_state() == TRX_TX) {  
+    if (!t_tx_start) t_tx_start = millis();  
+    if (millis() - t_tx_start > 10000) {  
+      t_tx_start = 0;  
+      bool ok = trx_switch(TRX_RX, 14074000UL);  
+      Serial.printf("[TEST] trx_switch(RX) = %d clk_sys=%lu\n",  
+                    (int)ok, (unsigned long)vfo_clk_sys_hz());  
+      tx_started = false;          // для повтора цикла — сбросить и дать restart  
+    }  
+  }
+
   cat_poll();                       // CAT-команды (Kenwood TS-2000, второй CDC)    
   modem_poll();                     // Hayes-модем (КАРКАС)    
   rx_decoders_poll();               // декодеры/RSID (КАРКАС) 
