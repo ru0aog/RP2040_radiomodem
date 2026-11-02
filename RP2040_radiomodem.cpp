@@ -145,8 +145,8 @@ void loop() {
     if (t_back == 0) t_back = millis();  
     if (millis() - t_back > 10000) {  
       t_back = 0;  
-      bool ok = trx_switch(TRX_RX, 14074000UL);  
-      Serial.printf("[TEST] trx_switch(RX, 14074000) = %d\n", (int)ok);  
+      bool ok = trx_switch(TRX_RX, 3600000UL);    
+      Serial.printf("[TEST] trx_switch(RX, 3600000) = %d\n", (int)ok);
     }  
   }  
   
@@ -189,14 +189,14 @@ void setup1() {
   // Стартовый RX: VFO-hook → quad_vfo → set_clk_sys → разгон 337.5 МГц.  
   // Паркует Core 0 флаг-протоколом (Core 0 уже в while(!core1_pll_done)  
   // с core0_park_poll — handshake обслуживается).  
-  vfo_on_trx_switch(TRX_RX, 14074000);  
-  
-  core1_pll_done = true;             // Core 0 выходит из ожидания  
-  
-  delay(100);                        // старт SM  
-  vfo_quad_debug();                  // [LODBG] clkdiv/enabled/lo_hz  
-  cat_set_freq_hz(14074000);         // зеркало FA для ответов CAT (s_rx_hz)  
-  rx_dsp_start(14074000);            // NCO = f_rx - vfo_quad_lo_hz()  
+  vfo_on_trx_switch(TRX_RX, 3600000);    
+    
+  core1_pll_done = true;             // Core 0 выходит из ожидания    
+    
+  delay(100);                        // старт SM    
+  vfo_quad_debug();                  // [LODBG] clkdiv/enabled/lo_hz    
+  cat_set_freq_hz(3600000);          // зеркало FA для ответов CAT (s_rx_hz)    
+  rx_dsp_start(3600000);             // NCO = f_rx - vfo_quad_lo_hz()
   rx_capture_start();                // DMA запускаем ПОСЛЕ настройки NCO  
 }  
   
