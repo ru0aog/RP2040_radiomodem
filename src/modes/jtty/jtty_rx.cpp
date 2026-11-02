@@ -114,9 +114,9 @@ static float   *g_metric_a     = nullptr;
 static float   *g_metric_b     = nullptr;  
 static uint8_t (*g_predecessor)[JTTY_NSTATES] = nullptr;  
   
-#define JTTY_ARENA_BYTES ((size_t)JTTY_NDATA  * JTTY_NTONES * sizeof(float) * 2u + \  
-                          (size_t)JTTY_NSTATES * sizeof(float) * 2u +            \  
-                          (size_t)JTTY_INFO_BITS * JTTY_NSTATES * sizeof(uint8_t))  
+#define JTTY_ARENA_BYTES ((size_t)JTTY_NDATA  * JTTY_NTONES * sizeof(float) * 2u + \
+                          (size_t)JTTY_NSTATES * sizeof(float) * 2u +            \
+                          (size_t)JTTY_INFO_BITS * JTTY_NSTATES * sizeof(uint8_t))
   
 // Идемпотентно: повторные rx_init (ретюн на той же моде) не перетекают пул.  
 static bool jtty_tables_alloc(void) {  
