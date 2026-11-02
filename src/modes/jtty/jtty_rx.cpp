@@ -113,16 +113,25 @@ static constexpr uint32_t JTTY_MSG_IDLE_MS = 4000;
 static float   *g_metric_a     = nullptr;  
 static float   *g_metric_b     = nullptr;  
 static uint8_t (*g_predecessor)[JTTY_NSTATES] = nullptr;  
+static uint32_t g_arena_gen    = 0;  // поколение TRX-пула, на котором выделен блок
   
 #define JTTY_ARENA_BYTES ((size_t)JTTY_NDATA  * JTTY_NTONES * sizeof(float) * 2u + \
                           (size_t)JTTY_NSTATES * sizeof(float) * 2u +            \
                           (size_t)JTTY_INFO_BITS * JTTY_NSTATES * sizeof(uint8_t))
   
 // Идемпотентно: повторные rx_init (ретюн на той же моде) не перетекают пул.  
+// Поколение mem_arena_trx_gen() — единственный критерий валидности:  
+// после mem_arena_switch (RX->TX->RX) или release (смена моды) блок  
+// инвалидирован, указатели перевыделяются.  
 static bool jtty_tables_alloc(void) {  
-    if (g_predecessor) return true;  
+    if (g_predecessor && g_arena_gen == mem_arena_trx_gen()) {  
+        return true;                    // блок жив — переиспользуем  
+    }  
+    g_data_power = g_dec_power = nullptr;  
+    g_metric_a = g_metric_b = nullptr;  
+    g_predecessor = nullptr;            // старый блок инвалидирован — забыть  
   
-    uint8_t* base = (uint8_t*)mem_arena_alloc(MEM_PHASE_RX, JTTY_ARENA_BYTES, 8);  
+    uint8_t* base = (uint8_t*)mem_arena_alloc(MEM_PHASE_RX, JTTY_ARENA_BYTES, 8);
     if (!base) {  
         Serial.printf("[JTTY] mem_arena: нет %u B в RX-пуле\n",  
                       (unsigned)JTTY_ARENA_BYTES);  
@@ -136,8 +145,9 @@ static bool jtty_tables_alloc(void) {
     g_metric_a    = fp; fp += JTTY_NSTATES;  
     g_metric_b    = fp; fp += JTTY_NSTATES;  
     g_predecessor = (uint8_t(*)[JTTY_NSTATES])fp;  // 8-байтное выравнивание базы сохранено  
+    g_arena_gen = mem_arena_trx_gen();  
     return true;  
-}  
+}
   
 // Вызывается из jtty_rx_stop() после сброса g_active — указатели инвалидны,  
 // сам блок освобождает mem_arena_release/switch.  
@@ -145,6 +155,7 @@ static void jtty_tables_free(void) {
     g_data_power = g_dec_power = nullptr;  
     g_metric_a = g_metric_b = nullptr;  
     g_predecessor = nullptr;  
+    g_arena_gen = 0;  
 }
   
 // Tone index from the two convolutionally encoded bits:  
@@ -604,8 +615,14 @@ void jtty_rx_stop(void)
   
 void jtty_rx_push(int16_t sample)  
 {  
-    if (!g_active || !g_predecessor) {  
+    if (!g_active) {  
         return;  
+    }  
+  
+    // Ленивая реаллокация: после trx_switch/mem_arena_release gen сменился,  
+    // указатели инвалидированы — перевыделяем здесь (Core 0, RX-фаза активна).  
+    if (g_arena_gen != mem_arena_trx_gen() && !jtty_tables_alloc()) {  
+        return;                     // нет памяти — пропускаем, лог уже в alloc  
     }
   
     float power[JTTY_NTONES];  

@@ -16,11 +16,15 @@
 // не очищается никогда.  
 //  
 // Контракт вызовов:  
-//   mem_arena_switch()/release() — только из trx_poll_core1() на Core 1,  
-//     когда старый тракт уже остановлен;  
-//   mem_arena_alloc(phase RX|TX) — только из кода активной фазы на  
-//     Core 1 (заполняет таблицы при старте тракта);  
+//   mem_arena_switch() — только из trx_poll_core1() на Core 1, когда  
+//     старый тракт уже остановлен; в этот момент Core 0 ждёт s_req_done  
+//     в trx_switch() — гонки по bump-указателю исключены;  
+//   mem_arena_release()/alloc(phase RX|TX) — на Core 0, строго когда  
+//     целевая фаза уже активна (после завершённого trx_switch(target)):  
+//     смена моды в RX — после stop_active_decoder(), до rx_init();  
 //   mem_arena_alloc(SHARED) — с любого ядра, но однопоточно (Core 0).  
+//   Все указатели из TRX-пула инвалидируются при switch/release —  
+//   потребитель отслеживает через mem_arena_trx_gen().
 // ============================================================================  
 #pragma once  
 #include <Arduino.h>  
@@ -42,8 +46,10 @@ void      mem_arena_init(void);
 void     *mem_arena_alloc(MemPhase phase, size_t size, size_t align = 8);  
   
 // Сбросить общую область RX/TX до нуля. Для MEM_PHASE_SHARED — ASSERT.  
-// Вызывать только когда противоположный тракт уже остановлен  
-// (порядок обеспечивает trx_switch → trx_poll_core1).  
+// Вызывать только когда противоположный тракт уже остановлен.  
+// Из trx_poll_core1() (переключение фаз) или из диспетчера декодеров  
+// на Core 0 при смене моды — после stop активной моды, до rx_init новой.  
+// Сбрасывает ВЕСЬ общий пул (s_trx_offset=0) и бьёт поколение.
 void      mem_arena_release(MemPhase phase);  
   
 // Переключение активной фазы RX <-> TX: уходящая фаза теряет всю  
@@ -67,3 +73,7 @@ static inline void mem_assert_fail(const char *expr, const char *file, int line)
   }  
 }  
 #define MEM_ASSERT(cond) do { if (!(cond)) mem_assert_fail(#cond, __FILE__, __LINE__); } while (0)
+
+// Поколение TRX-пула: растёт при каждом mem_arena_switch/release.  
+// Потребитель хранит поколение своего alloc'а; несовпадение = блок инвалидирован.  
+uint32_t mem_arena_trx_gen(void);
