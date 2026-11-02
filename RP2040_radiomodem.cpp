@@ -26,6 +26,7 @@
 #include "src/vfo/quad_vfo/quad_vfo.h"
 #include "src/cat/cat.h"
 #include "src/modem/modem.h"
+#include "src/filesys/file_manager.h"  
   
 // ============================================================================  
 // Флаг-протокол парковки Core 0 (объекты в src/trx/trx_control.cpp).  
@@ -52,7 +53,8 @@ void setup() {
 
   while (!Serial && millis() < 5000) delay(1);
   
-  cat_init();                     // выведет "[CAT] init: shared CDC port" и armed cat_enabled  
+  cat_init();                     // выведет "[CAT] init: shared CDC port" и armed cat_enabled
+  init_file_manager();
   Serial.println();
   Serial.println("RP2040_radiomodem — полудуплексный цифровой радиомодем");  
   Serial.println("====================================================");  
@@ -157,10 +159,11 @@ void loop() {
   rx_decoders_poll();
   rsid_poll();                 // печать "# RSID ..." + автопереключение моды
   usb_audio_poll();            // выкачиваем аудио-очередь rx_dsp -> UAC
+  check_and_handle_pc_changes();
   
-  // --- Пульс-строка раз в секунду ---  
+  // --- Пульс-строка раз в 60 сек ---  
   static uint32_t t_stat = 0;  
-  if (millis() - t_stat > 1000) {  
+  if (millis() - t_stat > 60000) {  
     t_stat = millis();  
     Serial.printf("arena watermark: %u / %u B | state=%s | tone=%u | "  
                   "clk_sys=%lu Hz\n",  
