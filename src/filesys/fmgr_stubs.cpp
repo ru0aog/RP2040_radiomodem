@@ -42,9 +42,9 @@ __attribute__((weak)) void watchdog_update(void) {
   
 // --- Перемонтирование USB-MSC после изменения диска ---  
 __attribute__((weak)) void remount_usb_disk(void) {  
-  usb_msc.setUnitReady(false);  
+  //usb_msc.setUnitReady(false);  
   delay(50);  
-  usb_msc.setUnitReady(true);  
+  //usb_msc.setUnitReady(true);  
 }  
   
 // --- Планировщик маяка (в радиомодеме не портирован) ---  
