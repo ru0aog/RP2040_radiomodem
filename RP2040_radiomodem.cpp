@@ -55,7 +55,7 @@ void setup() {
   while (!Serial && millis() < 5000) delay(1);  
     
   cat_init();                     // выведет "[CAT] init: shared CDC port" и armed cat_enabled  
-  init_file_manager();            // RAM-диск: загрузка/генерация образа (MSC уже armed)
+  //init_file_manager();            // RAM-диск: загрузка/генерация образа (MSC уже armed)
   Serial.println();
   Serial.println("RP2040_radiomodem — полудуплексный цифровой радиомодем");  
   Serial.println("====================================================");  
