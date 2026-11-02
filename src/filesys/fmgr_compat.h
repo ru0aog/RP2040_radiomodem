@@ -3,6 +3,8 @@
 #ifndef FMGR_COMPAT_H  
 #define FMGR_COMPAT_H  
   
+#include <Arduino.h>  
+  
 // --- из scheduler.h (RP2040_beacon) ---  
 #define MAX_SCHEDULE_TASKS 32  
 enum BeaconMode : uint8_t {  
@@ -29,6 +31,7 @@ extern uint8_t  rtc_month, rtc_day, rtc_hour, rtc_min, rtc_sec;
 String get_current_date(void);                    // weak-заглушка  
 String get_current_time(void);                    // weak-заглушка  
 void   watchdog_update(void);                     // weak-заглушка  
+void   remount_usb_disk(void);                    // weak-заглушка  
   
 // --- из vfo_hardware.h (RP2040_beacon) ---  
 #define PASSPORT_CLK_SYS_MAX_HZ 133000000UL  
@@ -39,9 +42,9 @@ void   watchdog_update(void);                     // weak-заглушка
 #define BCN_VER "2.19-port"  
 #define BCN_DAT __DATE__  
 #endif  
-extern bool clk_boosted;                          // флаг разгона (weak-заглушка)  
-void     vfo_clk_boost_exit(void);                // weak-заглушка  
-void     vfo_clk_boost_enter(int unused);         // weak-заглушка  
+// volatile обязателен — должно совпадать с объявлением в soft_tx.h,  
+// иначе conflicting declaration. Определение живёт в soft_tx.cpp.  
+extern volatile bool clk_boosted;  
 uint64_t vfo_calibrated_xosc_hz(void);            // weak-заглушка  
   
 #endif
