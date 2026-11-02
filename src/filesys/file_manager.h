@@ -41,7 +41,8 @@ extern String my_freq_rx_var;      // частота приёма, Гц
 extern String my_demod_var;        // "USB"/"LSB"/"RAW"/"AM"/"FM"  
 extern bool   debug_flag;  
 extern volatile bool pc_file_written;   // ПК записал INFO.TXT  
-  
+
+void init_usb_msc_interface(void);  // регистрация MSC-интерфейса — строго ДО маунта TinyUSB  
 void init_file_manager();  
 void check_and_handle_pc_changes();  
 void force_reset_to_default_disk();  
