@@ -47,20 +47,21 @@ volatile bool core1_pll_done = false;
 // ============================================================================  
 void setup() {
 
-  init_usb_msc_interface();   // до маунта TinyUSB — иначе хост диск не увидит 
+  init_usb_msc_interface();   // до маунта TinyUSB — иначе хост диск не увидит
 
   Serial.begin(115200);
 
-
-
-
-  // usb_audio_init();            // регистрируем UAC-интерфейс ДО mount
-  
-  
   while (!Serial && millis() < 5000) delay(1);
 
+  
+ 
+
+  //usb_audio_init();            // регистрируем UAC-интерфейс ДО mount
+
+
+
   cat_init();                     // выведет "[CAT] init: shared CDC port" и armed cat_enabled  
-  init_file_manager();        // загрузка образа из Flash или default-диск
+  init_file_manager();            // загрузка образа из Flash или default-диск
   Serial.println();
   Serial.println("RP2040_radiomodem — полудуплексный цифровой радиомодем");  
   Serial.println("====================================================");  
@@ -165,7 +166,7 @@ void loop() {
   rx_decoders_poll();
   rsid_poll();                 // печать "# RSID ..." + автопереключение моды
   //check_and_handle_pc_changes();
-  usb_audio_poll();            // выкачиваем аудио-очередь rx_dsp -> UAC
+  //usb_audio_poll();            // выкачиваем аудио-очередь rx_dsp -> UAC
   
   // --- Пульс-строка раз в 60 сек ---  
   static uint32_t t_stat = 0;  

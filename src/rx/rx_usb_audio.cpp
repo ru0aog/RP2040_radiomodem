@@ -405,26 +405,26 @@ void usb_audio_init(void) {
 
     // Регистрируем аудиоинтерфейс.
     if (!usb_out.begin(cfg)) {
-        Serial.println("[UAC] ERROR: usb_out.begin() failed");
+        //Serial.println("[UAC] ERROR: usb_out.begin() failed");
         return;
     }
 
-    Serial.println("[UAC] Audio interface initialized");
+    //Serial.println("[UAC] Audio interface initialized");
 
     // Важно: если USB уже перечислен хостом,
     // переподключаем устройство, чтобы Windows
     // заново прочитала конфигурацию и аудиодескрипторы.
     if (TinyUSBDevice.mounted()) {
-        Serial.println("[UAC] Re-enumerating USB...");
+        //Serial.println("[UAC] Re-enumerating USB...");
 
         TinyUSBDevice.detach();
         delay(10);
         TinyUSBDevice.attach();
     }
 
-    Serial.println("[UAC] init 44100/16/stereo");
+    //Serial.println("[UAC] init 44100/16/stereo");
 
-Serial.println("[UAC] Re-enumeration skipped");
+//Serial.println("[UAC] Re-enumeration skipped");
 }
 
 // Вызов из loop() на Core 0. Единственный потребитель аудио-очереди.  
