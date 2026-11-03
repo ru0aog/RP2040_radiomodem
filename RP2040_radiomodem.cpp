@@ -162,7 +162,7 @@ void loop() {
   cat_poll();                     // разбор команд с основного CDC, разделитель ';'
   rx_decoders_poll();
   rsid_poll();                 // печать "# RSID ..." + автопереключение моды
-  check_and_handle_pc_changes();
+  //check_and_handle_pc_changes();
   usb_audio_poll();            // выкачиваем аудио-очередь rx_dsp -> UAC
   
   // --- Пульс-строка раз в 60 сек ---  
