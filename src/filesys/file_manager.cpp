@@ -176,25 +176,16 @@ static void dir_entry(uint8_t idx, const char* name8_3, uint8_t attr,
 // State ring slots (8 x 32 KiB at 0x180000)
 // ---------------------------------------------------------------------------
 static const uint8_t* slot_src(uint32_t off, uint32_t* avail) {
-  if (off < SLOT_CONFIG_OFF) {
-    *avail = SLOT_CONFIG_OFF - off;
-    return &ram_disk_buffer[INFO_LBA * SECTOR_SIZE] + off;
-  }
-  if (off < SLOT_SET_OFF) {
-    *avail = SLOT_SET_OFF - off;
-    return &ram_disk_buffer[CONFIG_LBA * SECTOR_SIZE] + (off - SLOT_CONFIG_OFF);
-  }
-  if (off < SLOT_RESERVED_OFF) {
-    *avail = SLOT_RESERVED_OFF - off;
-    return &ram_disk_buffer[SET_LBA * SECTOR_SIZE] + (off - SLOT_SET_OFF);
+  // New slot format: save the complete RAM disk image, including boot sector,
+  // FAT12, root directory and file data. DISK_SIZE_BYTES (27,648) fits before
+  // SLOT_META_OFF (32,256), so the remaining gap is filled with 0xFF.
+  if (off < DISK_SIZE_BYTES) {
+    *avail = DISK_SIZE_BYTES - off;
+    return &ram_disk_buffer[off];
   }
   if (off < SLOT_META_OFF) {
     *avail = SLOT_META_OFF - off;
-    if (current_active_slot >= 0) {
-      return (const uint8_t*)(XIP_BASE + RING_OFFSET +
-             (uint32_t)current_active_slot * SLOT_SIZE + off);
-    }
-    return nullptr; // fill RESERVED with 0xFF when no previous slot exists
+    return nullptr; // erased-state padding (0xFF)
   }
   *avail = SLOT_SIZE - off;
   return nullptr; // SlotMeta is generated separately
@@ -318,12 +309,11 @@ bool load_state() {
 
   const uint8_t* base =
       (const uint8_t*)(XIP_BASE + RING_OFFSET + (uint32_t)best * SLOT_SIZE);
-  memcpy(&ram_disk_buffer[INFO_LBA * SECTOR_SIZE],
-         base + SLOT_INFO_OFF, SLOT_CONFIG_OFF - SLOT_INFO_OFF);
-  memcpy(&ram_disk_buffer[CONFIG_LBA * SECTOR_SIZE],
-         base + SLOT_CONFIG_OFF, SLOT_SET_OFF - SLOT_CONFIG_OFF);
-  memcpy(&ram_disk_buffer[SET_LBA * SECTOR_SIZE],
-         base + SLOT_SET_OFF, SLOT_RESERVED_OFF - SLOT_SET_OFF);
+  // Restore the complete FAT12 disk image, not just INFO/CONFIG/SET payloads.
+  // This preserves the boot sector, FAT tables, directory entries and file sizes;
+  // otherwise init_file_manager() would detect a missing 0x55AA signature and
+  // recreate the default disk on every reboot.
+  memcpy(ram_disk_buffer, base, DISK_SIZE_BYTES);
 
   const SlotMeta* m = (const SlotMeta*)(base + SLOT_META_OFF);
   log_write_ptr = m->log_write_ptr;
@@ -617,8 +607,10 @@ void init_usb_msc_interface() {
 
 void init_file_manager() {
   log_boot_recover_ptr();
-  if (!load_state() ||
+  const bool state_loaded = load_state();
+  if (!state_loaded ||
       ram_disk_buffer[510] != 0x55 || ram_disk_buffer[511] != 0xAA) {
+    Serial.println("[FM] no valid full-disk image; creating default FAT12 disk");
     create_default_fat_with_info_file();
   }
 
