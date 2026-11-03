@@ -20,13 +20,13 @@
 #include "src/rx/rx_decoders.h"  
 #include "src/rx/rx_usb_audio.h"      // usb_audio_init — проверить по факту  
 #include "src/rsid/rsid.h"  
-#include "src/trx/trx_control.h"  
-#include "src/vfo/vfo.h"  
-#include "src/vfo/soft_tx.h"  
-#include "src/vfo/quad_vfo/quad_vfo.h"  
-#include "src/cat/cat.h"  
-#include "src/modem/modem.h"  
-#include "src/filesys/file_manager.h"  
+#include "src/trx/trx_control.h"
+#include "src/vfo/vfo.h"
+#include "src/vfo/soft_tx.h"
+#include "src/vfo/quad_vfo/quad_vfo.h"
+#include "src/cat/cat.h"
+#include "src/modem/modem.h"
+#include "src/filesys/file_manager.h"
   
 // ============================================================================  
 // Флаг-протокол парковки Core 0 (объекты в src/trx/trx_control.cpp).  
@@ -45,24 +45,21 @@ volatile bool core1_pll_done = false;
 // ============================================================================  
 // SETUP — Core 0  
 // ============================================================================  
-void setup() {  
-  // Порядок композитного USB-устройства (CDC + MSC + UAC):  
-  //   1) регистрация ВСЕХ интерфейсов (дескрипторы, callbacks)  
-  //   2) ОДИН старт стека — usb_msc.begin() внутри init_usb_msc_interface()  
-  // usb_audio_init() только регистрирует UAC-дескрипторы, стека не стартует.  
-  usb_audio_init();            // регистрируем UAC-интерфейс ДО begin()  
+void setup() {
+  init_usb_msc_interface();   // до маунта TinyUSB — иначе хост диск не увидит 
+
+  usb_audio_init();            // регистрируем UAC-интерфейс ДО mount
+
+  Serial.begin(115200);
+
+  while (!Serial && millis() < 5000) delay(1);
+
   
-  Serial.begin(115200);  
-  while (!Serial && millis() < 5000) delay(1);  
-  
-  cat_init();                  // "[CAT] init: shared CDC port" + armed cat_enabled  
-  
-  // init_file_manager() внутри вызывает init_usb_msc_interface() —  
-  // это ЕДИНСТВЕННЫЙ usb_msc.begin() во всей прошивке.  
-  // В boot flash не стирается: только чтение XIP + сборка RAM-диска.  
-  init_file_manager();  
-  
-  Serial.println();  
+  // 
+
+  cat_init();                     // выведет "[CAT] init: shared CDC port" и armed cat_enabled  
+  init_file_manager();        // загрузка образа из Flash или default-диск
+  Serial.println();
   Serial.println("RP2040_radiomodem — полудуплексный цифровой радиомодем");  
   Serial.println("====================================================");  
   Serial.flush();  
@@ -95,19 +92,11 @@ void setup() {
   // Ждём окончания PLL-окна quad-движка (Core 1, setup1).  
   // ОБЯЗАТЕЛЬНО: обслуживаем park-протокол — Core 1 вызывает  
   // set_clk_sys с флаг-парковкой; без poll() парк уйдёт в PARK TIMEOUT.  
-  // Таймаут 10 с: если vfo_on_trx_switch() на Core 1 завис (например,  
-  // пустой диапазон clk_sys_min/max), продолжаем boot — USB и Serial  
-  // останутся живы для диагностики вместо мёртвого кирпича.  
-  {  
-    uint32_t t0 = millis();  
-    while (!core1_pll_done && millis() - t0 < 10000) {  
-      core0_park_poll();  
-      tight_loop_contents();  
-    }  
-    if (!core1_pll_done) {  
-      Serial.println("[ERR] core1_pll_done timeout — VFO/PLL init failed");  
-      Serial.flush();  
-    }  
+  // В этой точке на Core 0 — пустой цикл без USB: живой TinyUSB-стек  
+  // во время парковки кладёт handshake (был завис на "before park").  
+  while (!core1_pll_done) {  
+    core0_park_poll();  
+    tight_loop_contents();  
   }  
   
   Serial.println("[DBG] setup done");  
@@ -128,16 +117,16 @@ void loop() {
     digitalWrite(LED_BUILTIN, led);  
   }  
   
-  // --- Тест: TX на 3.65 МГц, перебор 4 тонов шагом 170 Гц каждые 500 мс ---  
+  // --- Тест: TX на 3.65 МГц, перебор 4 тонов шагом 170 Гц каждые 500 мс ---    
   // ОТКЛЮЧЁН для проверки RSID: RX стоит непрерывно, без прерываний на TX.  
   // Чтобы вернуть тест — поставить TX_TEST_ENABLED в true.  
   static constexpr bool TX_TEST_ENABLED = false;  
-  static bool     tx_started = false;  
-  static uint32_t t_tone = 0;  
-  static uint8_t  tone_idx = 0;  
-  
-  if (TX_TEST_ENABLED && !tx_started && millis() > 3000) {  
-    tx_started = true;  
+  static bool     tx_started = false;    
+  static uint32_t t_tone = 0;    
+  static uint8_t  tone_idx = 0;    
+    
+  if (TX_TEST_ENABLED && !tx_started && millis() > 3000) {    
+    tx_started = true;
     vfo_bank_set_grid(3650000UL, 170, 4);          // сетка ДО переключения  
     bool ok = trx_switch(TRX_TX, 3650000UL);  
     Serial.printf("[TEST] trx_switch(TX, 3650000) = %d\n", (int)ok);  
@@ -159,27 +148,22 @@ void loop() {
     tone_idx = (tone_idx + 1) & 3;  
   }  
   
-  // --- Возврат в RX через 10 с (только при включённом TX-тесте) ---  
-  static uint32_t t_back = 0;  
-  if (TX_TEST_ENABLED && tx_started && trx_state() == TRX_TX) {  
+  // --- Возврат в RX через 10 с (только при включённом TX-тесте) ---    
+  static uint32_t t_back = 0;    
+  if (TX_TEST_ENABLED && tx_started && trx_state() == TRX_TX) {
     if (t_back == 0) t_back = millis();  
     if (millis() - t_back > 10000) {  
       t_back = 0;  
-      bool ok = trx_switch(TRX_RX, 3602000UL);  
-      Serial.printf("[TEST] trx_switch(RX, 3602000) = %d\n", (int)ok);  
+      bool ok = trx_switch(TRX_RX, 3602000UL);    
+      Serial.printf("[TEST] trx_switch(RX, 3602000) = %d\n", (int)ok);
     }  
   }  
   
-  cat_poll();                     // разбор команд с основного CDC, разделитель ';'  
-  rx_decoders_poll();  
-  rsid_poll();                 // печать "# RSID ..." + автопереключение моды  
-  
-  // Файловый менеджер: отложенная первая запись состояния (state_save_pending),  
-  // обработка правок INFO/CONFIG/SET с ПК, save_state() только в TRX_RX.  
-  // БЕЗ этого вызова кольцо слотов и LOG никогда не пишутся.  
-  check_and_handle_pc_changes();  
-  
-  usb_audio_poll();            // выкачиваем аудио-очередь rx_dsp -> UAC  
+  cat_poll();                     // разбор команд с основного CDC, разделитель ';'
+  rx_decoders_poll();
+  rsid_poll();                 // печать "# RSID ..." + автопереключение моды
+  check_and_handle_pc_changes();
+  usb_audio_poll();            // выкачиваем аудио-очередь rx_dsp -> UAC
   
   // --- Пульс-строка раз в 60 сек ---  
   static uint32_t t_stat = 0;  
@@ -216,15 +200,15 @@ void setup1() {
   // Стартовый RX: VFO-hook → quad_vfo → set_clk_sys → разгон 337.5 МГц.  
   // Паркует Core 0 флаг-протоколом (Core 0 уже в while(!core1_pll_done)  
   // с core0_park_poll — handshake обслуживается).  
-  vfo_on_trx_switch(TRX_RX, 3602000);  
-  
-  core1_pll_done = true;             // Core 0 выходит из ожидания  
-  
-  delay(100);                        // старт SM  
-  vfo_quad_debug();                  // [LODBG] clkdiv/enabled/lo_hz  
-  cat_set_freq_hz(3602000);          // зеркало FA для ответов CAT (s_rx_hz)  
-  rx_dsp_start(3602000);             // NCO = f_rx - vfo_quad_lo_hz()  
-  rx_dsp_set_demod(RXD_DEMOD_USB);   // или соответствующее имя API  
+  vfo_on_trx_switch(TRX_RX, 3602000);    
+    
+  core1_pll_done = true;             // Core 0 выходит из ожидания    
+    
+  delay(100);                        // старт SM    
+  vfo_quad_debug();                  // [LODBG] clkdiv/enabled/lo_hz    
+  cat_set_freq_hz(3602000);          // зеркало FA для ответов CAT (s_rx_hz)    
+  rx_dsp_start(3602000);             // NCO = f_rx - vfo_quad_lo_hz()
+  rx_dsp_set_demod(RXD_DEMOD_USB);   // или соответствующее имя API
   rx_capture_start();                // DMA запускаем ПОСЛЕ настройки NCO  
 }  
   
