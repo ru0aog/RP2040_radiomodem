@@ -189,3 +189,15 @@ void log_file_clear(void);
 void log_file_write_line(String message);
 
 #endif // FILE_MANAGER_H
+
+ // API файлового менеджера
+ // ============================================================
+
++// Подготовка RAM FAT12, восстановление Flash state ring
++// и загрузка настроек. Не регистрирует USB.
++void file_manager_prepare(void);
++
+ void init_usb_msc_interface(void);
+
++// Совместимая полная инициализация файлового менеджера.
+ void init_file_manager(void);

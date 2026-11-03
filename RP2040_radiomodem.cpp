@@ -16,6 +16,7 @@
 #include <Arduino.h>
 #include <pico/flash.h>
 #include <hardware/sync.h>
+#include <Adafruit_TinyUSB.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -158,42 +159,64 @@ void setup()
     pinMode(LED_BUILTIN, OUTPUT);
     digitalWrite(LED_BUILTIN, LOW);
 
-    // Не вызывать flash_safe_execute_core_init() здесь:
-    // предыдущая попытка нарушила запуск USB и периферии.
-
     Serial.begin(115200);
 
-    // Инициализация памяти.
+    Serial.println();
+    Serial.println("RP2040_radiomodem");
+    Serial.println("[BOOT] Core 0 initialization");
+
+    // 1. Арена должна быть готова до работы подсистем.
     mem_arena_init();
 
-    // Сначала подготовить образ диска.
-    // init_file_manager() сам запускает USB MSC.
-    init_file_manager();
+    // 2. Восстановление файловой системы и настроек.
+    // USB-классы пока не регистрируются.
+    file_manager_prepare();
 
-    Serial.println();
-    Serial.println("[BOOT] RP2040_radiomodem");
-    Serial.println("[BOOT] USB MSC + CAT + USB Audio + VFO + RX DSP");
-
-    // Инициализация VFO и DSP.
+    // 3. Инициализация VFO и DSP.
     vfo_init();
-
     rx_dsp_init();
-
-    // Инициализация контроллера полудуплексного тракта.
     trx_init(vfo_on_trx_switch);
 
-    // USB Audio: PCM16, стерео, 44100 Гц.
-    // Драйвер находится в src/rx/rx_usb_audio.cpp.
-    //
-    // usb_audio_init() регистрирует аудиоинтерфейс и пытается
-    // повторно перечислить USB, если устройство уже подключено.
+    // 4. Диагностика состояния TinyUSB.
+    Serial.printf(
+        "[USB] initialized=%u mounted=%u\n",
+        (unsigned)TinyUSBDevice.isInitialized(),
+        (unsigned)TinyUSBDevice.mounted()
+    );
+
+    // 5. Регистрация MSC.
+    Serial.println("[USB] register MSC");
+    init_usb_msc_interface();
+
+    // 6. Регистрация UAC2.
+    Serial.println("[USB] register Audio");
     usb_audio_init();
 
+    // 7. Единое повторное перечисление.
+    // Выполняется только после регистрации обоих классов.
+    if (TinyUSBDevice.mounted()) {
+
+        Serial.println("[USB] detach");
+
+        TinyUSBDevice.detach();
+        delay(20);
+
+        TinyUSBDevice.attach();
+
+        Serial.println("[USB] attach");
+    }
+
+    Serial.printf(
+        "[USB] final: initialized=%u mounted=%u\n",
+        (unsigned)TinyUSBDevice.isInitialized(),
+        (unsigned)TinyUSBDevice.mounted()
+    );
+
+    // Core 1 разрешено запускать после подготовки Core 0.
     __dmb();
     core0_ready = true;
-    __dmb();
 
-    Serial.println("[BOOT] Core 0 ready");
+    Serial.println("[BOOT] Core 0 initialized");
 }
 
 // -----------------------------------------------------------------------------

@@ -36,6 +36,7 @@ volatile uint8_t pc_written_regions = 0;
 static uint32_t log_write_ptr = 0;
 static volatile bool state_save_pending = false;
 static bool usb_started = false;
+static bool file_manager_prepared = false;
 
 // ---------------------------------------------------------------------------
 // Multicore-safe flash helpers
@@ -595,34 +596,113 @@ void remount_usb_disk() {
   usb_msc.setUnitReady(true);
 }
 
-void init_usb_msc_interface() {
-  if (usb_started) return; // setup() and init_file_manager() both call this
-  usb_msc.setID("RP2040", "RADIOMODEM", "1.0");
-  usb_msc.setCapacity(SECTOR_COUNT, SECTOR_SIZE);
-  usb_msc.setReadWriteCallback(msc_read_cb, msc_write_cb, msc_flush_cb);
-  usb_msc.setUnitReady(true);
-  usb_msc.begin();
-  usb_started = true;
-}
 
-void init_file_manager() {
+// ---------------------------------------------------------------------------
+// File manager preparation — USB is NOT registered here
+// ---------------------------------------------------------------------------
+
+void file_manager_prepare() {
+  if (file_manager_prepared) {
+    Serial.println("[FM] already prepared");
+    return;
+  }
+
+  Serial.println("[FM] prepare: restoring filesystem");
+
+  // Восстановление указателя LOG.TXT.
   log_boot_recover_ptr();
+
+  // Восстановление последнего сохранённого RAM-диска.
   const bool state_loaded = load_state();
+
+  // Проверка FAT12 boot sector.
   if (!state_loaded ||
-      ram_disk_buffer[510] != 0x55 || ram_disk_buffer[511] != 0xAA) {
-    Serial.println("[FM] no valid full-disk image; creating default FAT12 disk");
+      ram_disk_buffer[510] != 0x55 ||
+      ram_disk_buffer[511] != 0xAA) {
+
+    Serial.println(
+        "[FM] no valid full-disk image; creating default FAT12 disk"
+    );
+
     create_default_fat_with_info_file();
   }
 
-  init_usb_msc_interface();
+  // Загрузка конфигурации.
   read_and_parse_INFO_txt();
   read_and_parse_CONFIG_txt();
   read_and_parse_SET_txt();
 
-  Serial.printf("[FM] init: slot=%ld seq=%lu log_ptr=%lu\n",
-                (long)current_active_slot, (unsigned long)current_max_seq,
-                (unsigned long)log_write_ptr);
+  file_manager_prepared = true;
+
+  Serial.printf(
+      "[FM] prepare OK: slot=%ld seq=%lu log_ptr=%lu\n",
+      (long)current_active_slot,
+      (unsigned long)current_max_seq,
+      (unsigned long)log_write_ptr
+  );
 }
+
+
+// ---------------------------------------------------------------------------
+// USB MSC registration
+// ---------------------------------------------------------------------------
+
+void init_usb_msc_interface() {
+  if (usb_started) {
+    Serial.println("[MSC] already registered");
+    return;
+  }
+
+  // Нельзя регистрировать MSC с неинициализированным RAM-диском.
+  file_manager_prepare();
+
+  Serial.println("[MSC] registering");
+
+  usb_msc.setID(
+      "RP2040",
+      "RADIOMODEM",
+      "1.0"
+  );
+
+  usb_msc.setCapacity(
+      SECTOR_COUNT,
+      SECTOR_SIZE
+  );
+
+  usb_msc.setReadWriteCallback(
+      msc_read_cb,
+      msc_write_cb,
+      msc_flush_cb
+  );
+
+  // Сначала регистрируем MSC как временно неготовый.
+  usb_msc.setUnitReady(false);
+
+  // Adafruit_USBD_MSC::begin() имеет тип void.
+  usb_msc.begin();
+
+  usb_started = true;
+
+  // Теперь носитель доступен.
+  usb_msc.setUnitReady(true);
+
+  Serial.printf(
+      "[MSC] registered: %u sectors x %u bytes\n",
+      (unsigned)SECTOR_COUNT,
+      (unsigned)SECTOR_SIZE
+  );
+}
+
+
+// ---------------------------------------------------------------------------
+// Backward-compatible initialization
+// ---------------------------------------------------------------------------
+
+void init_file_manager() {
+  file_manager_prepare();
+  init_usb_msc_interface();
+}
+
 
 void force_reset_to_default_disk() {
   create_default_fat_with_info_file();
