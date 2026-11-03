@@ -19,3 +19,10 @@ git commit -m "Total enforce: overwrite GitHub with 100% local state"
 
 # 4. Принудительно выталкиваем всё на GitHub, стирая старую историю на сервере
 git push origin main --force
+
+
+удалить файл
+git rm --cached firmware.map  
+git commit -m "Remove firmware.map build artifact"
+git push --force
+
