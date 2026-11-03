@@ -183,10 +183,12 @@ void save_state() {
       const uint8_t* src = slot_src(off, &avail);  
       if (src) crc = crc32_update(crc, src, avail);  
       else {  // RESERVED без активного слота — 0xFF  
-        static const uint8_t ff[256] = {[0 ... 255] = 0xFF};  
-        for (uint32_t n = avail; n; n -= (n > 256 ? 256 : n))  
-          crc = crc32_update(crc, ff, n > 256 ? 256 : n);  
-      }  
+        for (uint32_t n = 0; n < avail; ++n) {  
+          crc ^= 0xFF;  
+          for (int b = 0; b < 8; ++b)  
+            crc = (crc >> 1) ^ (0xEDB88320u & (-(int32_t)(crc & 1)));  
+        }  
+      } 
       off += avail;  
     }  
     crc = crc32_update(crc, (const uint8_t*)&meta, offsetof(SlotMeta, crc32));  
