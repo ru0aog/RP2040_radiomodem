@@ -194,4 +194,7 @@ void log_file_clear(void);
 
 void log_file_write_line(String message);
 
+void file_manager_set_flash_safe_ready(bool ready);
+
 #endif // FILE_MANAGER_H
+
