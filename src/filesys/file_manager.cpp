@@ -1339,32 +1339,15 @@ void init_usb_msc_interface(void)
 
     Serial.println("[MSC] registering");
 
-    usb_msc.setID(
-        "RP2040",
-        "RADIOMODEM",
-        "1.0"
-    );
+    usb_msc.setID("RP2040", "RADIOMODEM", "1.0"); 
 
-    usb_msc.setCapacity(
-        SECTOR_COUNT,
-        SECTOR_SIZE
-    );
+    usb_msc.setCapacity(SECTOR_COUNT, SECTOR_SIZE);
 
-    usb_msc.setReadWriteCallback(
-        msc_read_cb,
-        msc_write_cb,
-        msc_flush_cb
-    );
+    usb_msc.setReadWriteCallback(msc_read_cb, msc_write_cb, msc_flush_cb); 
 
-    // Register MSC as temporarily not ready.
-    usb_msc.setUnitReady(false);
-
-    // Adafruit_USBD_MSC::begin() returns void.
-    usb_msc.begin();
-
-    usb_started = true;
-
-    usb_msc.setUnitReady(true);
+    usb_msc.setUnitReady(true);  
+    
+    usb_msc.begin();  
 
     Serial.printf(
         "[MSC] registered: %u sectors x %u bytes\n",

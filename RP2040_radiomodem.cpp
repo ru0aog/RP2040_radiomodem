@@ -46,16 +46,18 @@ volatile bool core1_pll_done = false;
 // SETUP — Core 0  
 // ============================================================================  
 void setup() {
-  init_usb_msc_interface();   // до маунта TinyUSB — иначе хост диск не увидит 
 
-  //usb_audio_init();            // регистрируем UAC-интерфейс ДО mount
+  init_usb_msc_interface();   // до маунта TinyUSB — иначе хост диск не увидит 
 
   Serial.begin(115200);
 
-  while (!Serial && millis() < 5000) delay(1);
 
+
+
+  // usb_audio_init();            // регистрируем UAC-интерфейс ДО mount
   
-  // 
+  
+  while (!Serial && millis() < 5000) delay(1);
 
   cat_init();                     // выведет "[CAT] init: shared CDC port" и armed cat_enabled  
   init_file_manager();        // загрузка образа из Flash или default-диск

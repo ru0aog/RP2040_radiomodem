@@ -411,8 +411,6 @@ void usb_audio_init(void) {
 
     Serial.println("[UAC] Audio interface initialized");
 
-
-
     // Важно: если USB уже перечислен хостом,
     // переподключаем устройство, чтобы Windows
     // заново прочитала конфигурацию и аудиодескрипторы.
@@ -428,7 +426,6 @@ void usb_audio_init(void) {
 
 Serial.println("[UAC] Re-enumeration skipped");
 }
-
 
 // Вызов из loop() на Core 0. Единственный потребитель аудио-очереди.  
 void usb_audio_poll(void) {  
