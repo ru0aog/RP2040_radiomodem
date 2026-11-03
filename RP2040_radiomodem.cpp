@@ -1,14 +1,14 @@
 // RP2040_radiomodem.cpp
 //
 // RP2040_radiomodem
-// USB MSC + USB CDC CAT + VFO + RX DSP
+// USB MSC + USB CDC CAT + USB Audio + VFO + RX DSP
 //
 // Core 0:
-//   USB, файловый менеджер, CAT, LED.
+//   USB, USB Audio, файловый менеджер, CAT, LED.
 //   Обслуживание парковки Core 0 при изменении clk_sys.
 //
 // Core 1:
-//   Flash safety, VFO, ADC/DMA, RX DSP.
+//   VFO, ADC/DMA, RX DSP.
 //
 // CAT: ID; FA; IF;
 // Изменение частоты через CAT пока отключено.
@@ -27,6 +27,7 @@
 #include "src/trx/trx_control.h"
 #include "src/rx/rx_dsp.h"
 #include "src/rx/rx_capture.h"
+#include "src/rx/rx_usb_audio.h"
 
 // Реализация находится в src/trx/trx_control.cpp.
 extern void core0_park_poll(void);
@@ -35,6 +36,11 @@ extern void core0_park_poll(void);
 // Synchronization
 // -----------------------------------------------------------------------------
 
+// ВНИМАНИЕ:
+// flash_safe_execute_core_init() пока намеренно пропущен:
+// в текущей диагностической сборке его вызов на Core 1 блокировал запуск.
+// Поэтому безопасная запись во Flash остаётся отключённой.
+
 static volatile bool flash_safe_ready = false;
 static volatile bool core0_ready = false;
 static volatile bool core1_ready = false;
@@ -42,16 +48,13 @@ static volatile bool core1_ready = false;
 // Диагностический этап запуска Core 1:
 //
 // 0 — setup1 ещё не начат
-// 1 — выполняется flash_safe_execute_core_init()
-// 2 — Flash safety инициализирован
+// 1 — начало setup1
+// 2 — Flash safety пропущен
 // 3 — ожидание готовности Core 0
 // 4 — настройка VFO
 // 5 — запуск DSP
 // 6 — запуск ADC/DMA
 // 7 — инициализация завершена
-//
-// Если stage постоянно равен 1, зависание происходит
-// внутри flash_safe_execute_core_init().
 
 static volatile uint32_t core1_stage = 0;
 
@@ -102,7 +105,6 @@ static void cat_execute(const char* cmd)
 
     if (strcmp(cmd, "IF") == 0) {
         char out[] = "IF00000000000       -00300   20000000;";
-
         uint32_t f = cat_freq_hz;
 
         for (int i = 12; i >= 2; --i) {
@@ -133,7 +135,6 @@ static void cat_poll_readonly()
             cat_buf[cat_len] = '\0';
 
             cat_execute(cat_buf);
-
             cat_len = 0;
         }
         else if (c != '\r' && c != '\n') {
@@ -157,29 +158,36 @@ void setup()
     pinMode(LED_BUILTIN, OUTPUT);
     digitalWrite(LED_BUILTIN, LOW);
 
-    // Не добавлять flash_safe_execute_core_init() сюда:
-    // предыдущая версия с этим вызовом перестала запускаться.
-    //
-    // Сохраняем последовательность инициализации USB,
-    // при которой диск и COM-порт определялись.
-
-    init_usb_msc_interface();
+    // Не вызывать flash_safe_execute_core_init() здесь:
+    // предыдущая попытка нарушила запуск USB и периферии.
 
     Serial.begin(115200);
 
+    // Инициализация памяти.
     mem_arena_init();
 
+    // Сначала подготовить образ диска.
+    // init_file_manager() сам запускает USB MSC.
     init_file_manager();
 
     Serial.println();
     Serial.println("[BOOT] RP2040_radiomodem");
-    Serial.println("[BOOT] USB MSC + CAT + VFO + RX DSP");
+    Serial.println("[BOOT] USB MSC + CAT + USB Audio + VFO + RX DSP");
 
+    // Инициализация VFO и DSP.
     vfo_init();
 
     rx_dsp_init();
 
+    // Инициализация контроллера полудуплексного тракта.
     trx_init(vfo_on_trx_switch);
+
+    // USB Audio: PCM16, стерео, 44100 Гц.
+    // Драйвер находится в src/rx/rx_usb_audio.cpp.
+    //
+    // usb_audio_init() регистрирует аудиоинтерфейс и пытается
+    // повторно перечислить USB, если устройство уже подключено.
+    usb_audio_init();
 
     __dmb();
     core0_ready = true;
@@ -217,20 +225,26 @@ void loop()
         );
     }
 
+    // USB Audio должен регулярно обслуживаться на Core 0.
+    // Функция забирает аудиоблоки из очереди DSP и передаёт их
+    // в существующий USB Audio Class.
+    usb_audio_poll();
+
     if (core1_ready && !core1_reported) {
         core1_reported = true;
         Serial.println("[BOOT] Core 1 initialized");
     }
 
     // Сохранение виртуального диска разрешается только после
-    // инициализации Flash safety на Core 1.
+    // отдельного исправления инициализации Flash safety.
     //
-    // Пока Core 1 зависает на этапе 1, эта функция не вызывается.
-    // Поэтому сохранение CONFIG.TXT этим кодом не исправлено.
+    // Сейчас flash_safe_ready намеренно остаётся false:
+    // не выполняем запись во Flash без безопасной остановки Core 1.
     if (flash_safe_ready) {
         check_and_handle_pc_changes();
     }
 
+    // CAT: команды чтения ID; FA; IF;.
     cat_poll_readonly();
 
     // Диагностика раз в секунду.
@@ -259,13 +273,11 @@ void setup1()
     core1_stage = 1;
     __dmb();
 
-    // ВРЕМЕННО ПРОПУСКАЕМ:
-    // flash_safe_execute_core_init();
+    // Временно пропускаем flash_safe_execute_core_init():
+    // в предыдущей сборке функция блокировала Core 1.
     //
-    // По диагностике именно этот вызов блокирует Core 1.
-
-    // Важно: flash_safe_ready НЕ устанавливаем!
-    // До решения проблемы запрещаем операции сохранения во Flash.
+    // НЕ устанавливаем flash_safe_ready.
+    // Запись во Flash остаётся запрещённой.
 
     core1_stage = 2;
     __dmb();
@@ -278,19 +290,19 @@ void setup1()
         tight_loop_contents();
     }
 
-    // Этап 4: VFO.
+    // Этап 4: настройка VFO.
     core1_stage = 4;
     __dmb();
 
     vfo_on_trx_switch(TRX_RX, START_FREQ_HZ);
 
-    // Этап 5: DSP.
+    // Этап 5: запуск DSP.
     core1_stage = 5;
     __dmb();
 
     rx_dsp_start(START_FREQ_HZ);
 
-    // Этап 6: ADC/DMA.
+    // Этап 6: запуск ADC/DMA.
     core1_stage = 6;
     __dmb();
 
@@ -315,11 +327,14 @@ void setup1()
 
 void loop1()
 {
+    // Обработка запросов переключения RX/TX.
     trx_poll_core1();
 
+    // DSP работает только в режиме приёма.
     if (trx_state() == TRX_RX) {
         rx_dsp_poll();
     }
 
+    // Обслуживание VFO.
     vfo_poll();
 }
