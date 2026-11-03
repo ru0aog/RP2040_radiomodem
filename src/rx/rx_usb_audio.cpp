@@ -381,13 +381,13 @@ static bool next_frame(int16_t* l, int16_t* r) {
     return true;  
 }  
   
-static USBAudioStream usb_out;  
+//static USBAudioStream usb_out;  
+USBAudioDeviceTinyUSB usb_out;
+
 static int16_t pcm_buffer[192 * 2];  
   
 void usb_audio_init(void) {
 
-    return;
-    
     agc_avg_q16 = (int64_t)4096 << 16;
     lim_peak_q16 = (int64_t)2048 << 16;
 
@@ -411,6 +411,8 @@ void usb_audio_init(void) {
         //Serial.println("[UAC] ERROR: usb_out.begin() failed");
         return;
     }
+
+    //return;                          // (4) виснет? -> usb_out.begin  <- главный подозреваемый
 
     //Serial.println("[UAC] Audio interface initialized");
 

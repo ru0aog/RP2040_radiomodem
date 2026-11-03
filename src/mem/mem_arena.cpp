@@ -12,7 +12,7 @@
 // mem_arena_alloc() при переносе модулей — API стабилен с первого коммита.  
 // ============================================================================  
 #ifndef MEM_TRX_POOL_SIZE    
-#define MEM_TRX_POOL_SIZE    (48u * 1024u)   // общая область RX|TX: JTTY 29120 Б + запас    
+#define MEM_TRX_POOL_SIZE    (36u * 1024u)   // общая область RX|TX: JTTY 29120 Б + запас    
 #endif
 #ifndef MEM_SHARED_POOL_SIZE  
 #define MEM_SHARED_POOL_SIZE  (8u * 1024u)   // настройки, расписание, CAT  
