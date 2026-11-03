@@ -1,12 +1,16 @@
 ﻿// src/filesys/file_manager.cpp — USB-MSC (FAT12, 566 секторов) + кольцо  
 // состояний 8x32 КБ + LOG.TXT 256 КБ напрямую из flash (XIP).  
 // Flash пишется только при trx_state()==TRX_RX.  
+// Все flash-операции выполняются с парковкой Core 1 (multicore_lockout):  
+// на время erase/program XIP отключён, второе ядро не должно исполнять  
+// код из flash. Требуется multicore_lockout_victim_init() на Core 1.  
   
 #include "file_manager.h"  
+#include "../trx/trx_control.h"  
 #include <Adafruit_TinyUSB.h>  
 #include <hardware/flash.h>  
 #include <hardware/sync.h>  
-#include "../trx/trx_control.h"  
+#include <pico/multicore.h>  
   
 Adafruit_USBD_MSC usb_msc;  
   
@@ -25,22 +29,21 @@ alignas(4) static uint8_t ram_disk_buffer[DISK_SIZE_BYTES];
   
 volatile uint32_t last_msc_write_time = 0;  
 bool pc_activity_detected = false;  
-// биты: 0=sys(0-5), 1=INFO(6-21), 2=CONFIG(22-37), 4=SET(38-53)  
+// маски: 0x01=sys(0-5), 0x02=INFO(6-21), 0x04=CONFIG(22-37), 0x08=SET(38-53)  
 volatile uint8_t pc_written_regions = 0;  
   
 static uint32_t log_write_ptr = 0;   // байт-смещение в LOG-области  
   
 // ---------------------------------------------------------------------------  
-// CRC32 (полином 0xEDB88320, как в zlib)  
+// CRC32 (полином 0xEDB88320, как в zlib), инкрементальный  
 // ---------------------------------------------------------------------------  
-static uint32_t crc32_buf(const uint8_t* p, uint32_t len) {  
-  uint32_t crc = 0xFFFFFFFFu;  
+static uint32_t crc32_update(uint32_t crc, const uint8_t* p, uint32_t len) {  
   for (uint32_t i = 0; i < len; ++i) {  
     crc ^= p[i];  
     for (int b = 0; b < 8; ++b)  
       crc = (crc >> 1) ^ (0xEDB88320u & (-(int32_t)(crc & 1)));  
   }  
-  return ~crc;  
+  return crc;  
 }  
   
 // ---------------------------------------------------------------------------  
@@ -116,14 +119,6 @@ static void dir_entry(uint8_t idx, const char* name8_3, uint8_t attr,
 // ---------------------------------------------------------------------------  
 // Кольцо слотов состояний (8 x 32 КБ @ 0x180000)  
 // ---------------------------------------------------------------------------  
-static uint32_t crc32_update(uint32_t crc, const uint8_t* p, uint32_t len) {  
-  for (uint32_t i = 0; i < len; ++i) {  
-    crc ^= p[i];  
-    for (int b = 0; b < 8; ++b)  
-      crc = (crc >> 1) ^ (0xEDB88320u & (-(int32_t)(crc & 1)));  
-  }  
-  return crc;  
-}  
   
 // Источник байта слота по смещению (без буфера 32 КБ в RAM)  
 static const uint8_t* slot_src(uint32_t off, uint32_t* avail) {  
@@ -174,21 +169,22 @@ void save_state() {
   meta.crc32         = 0;  
   meta.log_write_ptr = log_write_ptr;  
   
-  // Проход 1: CRC по всему слоту (crc32 считается нулём)  
+  // Проход 1: CRC по всему слоту (поле crc32 считается нулём)  
   uint32_t crc = 0xFFFFFFFFu;  
   {  
     uint32_t off = 0;  
     while (off < SLOT_META_OFF) {  
       uint32_t avail;  
       const uint8_t* src = slot_src(off, &avail);  
-      if (src) crc = crc32_update(crc, src, avail);  
-      else {  // RESERVED без активного слота — 0xFF  
+      if (src) {  
+        crc = crc32_update(crc, src, avail);  
+      } else {  // RESERVED без активного слота — 0xFF  
         for (uint32_t n = 0; n < avail; ++n) {  
           crc ^= 0xFF;  
           for (int b = 0; b < 8; ++b)  
             crc = (crc >> 1) ^ (0xEDB88320u & (-(int32_t)(crc & 1)));  
         }  
-      } 
+      }  
       off += avail;  
     }  
     crc = crc32_update(crc, (const uint8_t*)&meta, offsetof(SlotMeta, crc32));  
@@ -199,8 +195,9 @@ void save_state() {
   }  
   meta.crc32 = ~crc;  
   
-  // Проход 2: erase + program постранично  
+  // Проход 2: erase + program постранично, с парковкой Core 1  
   uint32_t target = RING_OFFSET + next_slot * SLOT_SIZE;  
+  multicore_lockout_start_blocking();  
   uint32_t ints = save_and_disable_interrupts();  
   flash_range_erase(target, SLOT_SIZE);            // 8 блоков по 4 КБ  
   uint32_t off = 0;  
@@ -225,13 +222,14 @@ void save_state() {
     off += chunk;  
   }  
   restore_interrupts(ints);  
+  multicore_lockout_end_blocking();  
   flash_flush_cache();  
   
   current_active_slot = next_slot;  
   current_max_seq     = next_seq;  
   Serial.printf("[FM] save_state: slot=%ld seq=%lu\n",  
                 (long)next_slot, (unsigned long)next_seq);  
-}
+}  
   
 bool load_state() {  
   int32_t best = -1; uint32_t best_seq = 0;  
@@ -240,7 +238,7 @@ bool load_state() {
         (const uint8_t*)(XIP_BASE + RING_OFFSET + s * SLOT_SIZE);  
     const SlotMeta* m = (const SlotMeta*)(base + SLOT_META_OFF);  
     if (m->magic != SLOT_MAGIC || m->seq <= best_seq) continue;  
-    if (slot_crc_flash(base) != m->crc32) continue;        // битый слот
+    if (slot_crc_flash(base) != m->crc32) continue;        // битый слот  
     best = s; best_seq = m->seq;  
   }  
   if (best < 0) return false;  
@@ -338,7 +336,7 @@ static void create_default_fat_with_info_file() {
 }  
   
 // ---------------------------------------------------------------------------  
-// Парсер тегов [TAG]...[/TAG]  
+// Парсер тегов [TAG]...[/TAG] — поиск ограничен размером области файла  
 // ---------------------------------------------------------------------------  
 static String tag_value_at(uint32_t lba, uint32_t area_len, const char* tag) {  
   char open[32], close[36];  
@@ -359,7 +357,7 @@ static String tag_value_at(uint32_t lba, uint32_t area_len, const char* tag) {
     if (*c >= 32 && *c <= 126) s += *c;  
   s.trim();  
   return s;  
-}
+}  
   
 void read_and_parse_INFO_txt() {  
   String v;  
@@ -383,7 +381,8 @@ void read_and_parse_SET_txt() {
     vfo_max_pll_vco_hz = (uint32_t)strtoul(v.c_str(), nullptr, 10);  
   if ((v = tag_value_at(SET_LBA, SET_MAX_BYTES, "XOSC_PPB")).length())  
     vfo_xosc_corr_ppb = (int32_t)v.toInt();  
-}
+  // TODO: scan-таблица [SCAN]  
+}  
   
 void print_current_settings() {  
   Serial.printf("[FM] call=%s qth=%s f_rx=%s demod=%s debug=%d\n",  
@@ -404,29 +403,34 @@ static void log_boot_recover_ptr() {
 }  
   
 void log_append(const uint8_t* data, uint32_t len) {  
-  if (trx_state() != TRX_RX) return;  
+  if (trx_state() != TRX_RX) return;          // flash пишем только на приёме  
   uint32_t off = 0;  
   while (off < len) {  
-    if (log_write_ptr >= LOG_MAX_BYTES) log_write_ptr = 0;  
+    if (log_write_ptr >= LOG_MAX_BYTES) log_write_ptr = 0;   // wrap  
+    // erase 4 КБ-блока при входе в новый блок  
     if ((log_write_ptr % FLASH_SECTOR_SIZE) == 0) {  
+      multicore_lockout_start_blocking();  
       uint32_t ints = save_and_disable_interrupts();  
       flash_range_erase(LOG_FLASH_OFFSET + log_write_ptr, FLASH_SECTOR_SIZE);  
       restore_interrupts(ints);  
+      multicore_lockout_end_blocking();  
     }  
     uint32_t room = FLASH_PAGE_SIZE - (log_write_ptr % FLASH_PAGE_SIZE);  
     uint32_t n = len - off; if (n > room) n = room;  
     alignas(4) uint8_t page[FLASH_PAGE_SIZE];  
     memset(page, 0xFF, sizeof(page));  
     memcpy(page, data + off, n);  
+    multicore_lockout_start_blocking();  
     uint32_t ints = save_and_disable_interrupts();  
     flash_range_program(LOG_FLASH_OFFSET + log_write_ptr, page, FLASH_PAGE_SIZE);  
     restore_interrupts(ints);  
+    multicore_lockout_end_blocking();  
     log_write_ptr += FLASH_PAGE_SIZE;   // указатель всегда на границе страницы  
     off += n;  
   }  
   flash_flush_cache();  
   remount_usb_disk();  
-}
+}  
   
 void log_file_write_line(String message) {  
   String line = message + "\r\n";  
@@ -435,9 +439,11 @@ void log_file_write_line(String message) {
   
 void log_file_clear() {  
   if (trx_state() != TRX_RX) return;  
+  multicore_lockout_start_blocking();  
   uint32_t ints = save_and_disable_interrupts();  
   flash_range_erase(LOG_FLASH_OFFSET, LOG_MAX_BYTES);  
   restore_interrupts(ints);  
+  multicore_lockout_end_blocking();  
   flash_flush_cache();  
   log_write_ptr = 0;  
 }  
@@ -489,10 +495,11 @@ void force_reset_to_default_disk() {
 void check_and_handle_pc_changes() {  
   if (!pc_activity_detected) return;  
   if (millis() - last_msc_write_time < 1500) return;  
+  if (trx_state() != TRX_RX) return;   // отложим до возврата в RX  
   pc_activity_detected = false;  
   uint8_t regions = pc_written_regions;  
   pc_written_regions = 0;  
-  if (trx_state() == TRX_RX) save_state();  
+  save_state();  
   if (regions & 0x02) read_and_parse_INFO_txt();  
   if (regions & 0x04) read_and_parse_CONFIG_txt();  
   if (regions & 0x08) read_and_parse_SET_txt();  
