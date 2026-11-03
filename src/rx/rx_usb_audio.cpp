@@ -7,8 +7,7 @@
 // ============================================================================  
 #include <Arduino.h>  
 #include <math.h>  
-#include <string.h>
-#include <Adafruit_TinyUSB.h>
+#include <string.h>  
   
 #include "rx_dsp.h"  
 #include "rx_usb_audio.h"  
@@ -382,109 +381,57 @@ static bool next_frame(int16_t* l, int16_t* r) {
     return true;  
 }  
   
-static USBAudioStream usb_out;
-static int16_t pcm_buffer[192 * 2];
-
-static bool audio_started = false;
+static USBAudioStream usb_out;  
+static int16_t pcm_buffer[192 * 2];  
   
-// ---------------------------------------------------------------------------
-// USB Audio Class 2.0 initialization
-// ---------------------------------------------------------------------------
-
 void usb_audio_init(void) {
-
-    if (audio_started) {
-        Serial.println("[UAC] already initialized");
-        return;
-    }
-
-    Serial.println("[UAC] init: enter");
-
-    // Проверка состояния общего USB-устройства.
-    Serial.printf(
-        "[UAC] TinyUSB initialized=%u mounted=%u\n",
-        (unsigned)TinyUSBDevice.isInitialized(),
-        (unsigned)TinyUSBDevice.mounted()
-    );
-
-    // Arduino-Pico обычно инициализирует TinyUSB через ядро.
-    // Проверка оставлена для совместимости с другими конфигурациями.
-    if (!TinyUSBDevice.isInitialized()) {
-        Serial.println("[UAC] TinyUSB begin");
-
-        TinyUSBDevice.begin(0);
-    }
-
-    if (!TinyUSBDevice.isInitialized()) {
-        Serial.println("[UAC] ERROR: TinyUSB is not initialized");
-        return;
-    }
-
-    // Сброс состояния DSP-аудиовыхода.
-    agc_avg_q16  = (int64_t)4096 << 16;
+    agc_avg_q16 = (int64_t)4096 << 16;
     lim_peak_q16 = (int64_t)2048 << 16;
 
     memset(pcm_buffer, 0, sizeof(pcm_buffer));
-
-    rs_started         = false;
-    rs_init_count      = 0;
-    rs_advance_pending = false;
-    rs_phase_q         = 0;
-
-    bi = nullptr;
-    bq = nullptr;
-    cur_n = 0;
-    pos = 0;
-
-    biquad_reset(bq_ssb);
-    biquad_reset(bq_i);
-    biquad_reset(bq_q);
-
     push_demod_to_core1();
 
+    // Инициализация TinyUSB.
+    if (!TinyUSBDevice.isInitialized()) {
+        TinyUSBDevice.begin(0);
+    }
+
     // Конфигурация USB Audio Class 2.0.
-    // TX_MODE = устройство передаёт звук компьютеру.
     auto cfg = usb_out.defaultConfig(TX_MODE);
 
     cfg.sample_rate     = 44100;
     cfg.channels        = 2;
     cfg.bits_per_sample = 16;
 
-    Serial.println(
-        "[UAC] configuration: UAC2 / TX / 44100 Hz / stereo / PCM16"
-    );
-
-    Serial.println("[UAC] before usb_out.begin");
-
-    const bool ok = usb_out.begin(cfg);
-
-    Serial.printf(
-        "[UAC] after usb_out.begin: %u\n",
-        (unsigned)ok
-    );
-
-    if (!ok) {
-        Serial.println("[UAC] ERROR: registration failed");
+    // Регистрируем аудиоинтерфейс.
+    if (!usb_out.begin(cfg)) {
+        Serial.println("[UAC] ERROR: usb_out.begin() failed");
         return;
     }
 
-    audio_started = true;
+    Serial.println("[UAC] Audio interface initialized");
 
-    Serial.println("[UAC] registration OK");
 
-    Serial.printf(
-        "[UAC] TinyUSB initialized=%u mounted=%u\n",
-        (unsigned)TinyUSBDevice.isInitialized(),
-        (unsigned)TinyUSBDevice.mounted()
-    );
+
+    // Важно: если USB уже перечислен хостом,
+    // переподключаем устройство, чтобы Windows
+    // заново прочитала конфигурацию и аудиодескрипторы.
+    if (TinyUSBDevice.mounted()) {
+        Serial.println("[UAC] Re-enumerating USB...");
+
+        TinyUSBDevice.detach();
+        delay(10);
+        TinyUSBDevice.attach();
+    }
+
+    Serial.println("[UAC] init 44100/16/stereo");
+
+Serial.println("[UAC] Re-enumeration skipped");
 }
 
 
 // Вызов из loop() на Core 0. Единственный потребитель аудио-очереди.  
 void usb_audio_poll(void) {  
-
-    if (!audio_started) return;
-
     // Адаптивная подстройка темпа под часы USB-хоста: держим заполнение  
     // очереди около середины (RX_AUD_BUFS=8 → TARGET=4).  
     const float   TARGET = 4.0f;  
@@ -522,13 +469,7 @@ void usb_audio_poll(void) {
 // ---- API по rx_usb_audio.h (совместимость со старым контрактом) ----  
 void     rx_usb_audio_set_rate(uint32_t hz)              { uac_rate_hz = hz; }  
 uint32_t rx_usb_audio_rate_hz(void)                      { return uac_rate_hz; }  
-void rx_usb_audio_push_block(const int16_t* pcm, size_t n) {
-    if (!audio_started) return;
-
-    if (pcm && n) {
-        usb_out.write(
-            (const uint8_t*)pcm,
-            n * sizeof(int16_t)
-        );
-    }
+void     rx_usb_audio_push_block(const int16_t* pcm, size_t n) {  
+    // Внешний пуш PCM (если понадобится обход очереди rx_dsp).  
+    if (pcm && n) usb_out.write((const uint8_t*)pcm, n * sizeof(int16_t));  
 }
