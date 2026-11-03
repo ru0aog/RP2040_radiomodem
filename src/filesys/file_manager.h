@@ -45,7 +45,7 @@
 // ---------------------------------------------------------------------------  
 // Flash-карта (2 МБ):  
 //   0x140000-0x180000  LOG-область, 256 КБ (кольцо, erase 4 КБ)  
-//   0x180000-0x200000  кольцо состояний: 8 слотов x 32 КБ  
+//   0x180000-0x200000  кольцо состояний: 8 слотов по 32 КБ  
 // Слот: INFO 8КБ @0, CONFIG 8КБ @0x2000, SET 8КБ @0x4000,  
 //       RESERVED 7.5КБ @0x6000, SlotMeta 512Б @0x7E00  
 // ---------------------------------------------------------------------------  
@@ -54,34 +54,31 @@
 #define RING_OFFSET        0x180000u  
 #define SLOT_SIZE          (32u * 1024u)  
 #define SLOTS              8  
-#define SLOT_MAGIC         0xBEA1C011  
+#define SLOT_MAGIC         0xBEA1C011u  
   
-#define SLOT_INFO_OFF      0x0000u  
 #define SLOT_CONFIG_OFF    0x2000u  
 #define SLOT_SET_OFF       0x4000u  
 #define SLOT_RESERVED_OFF  0x6000u  
-#define SLOT_RESERVED_SIZE (SLOT_SIZE - SLOT_RESERVED_OFF - 512)   // 7.5 КБ  
 #define SLOT_META_OFF      0x7E00u  
   
 struct __attribute__((packed)) SlotMeta {  
-  uint32_t magic;          // SLOT_MAGIC  
-  uint32_t seq;            // монотонный счётчик записей  
-  uint32_t crc32;          // CRC32 слота (meta->crc32 обнуляется при подсчёте)  
-  uint32_t log_write_ptr;  // смещение записи в LOG-области, байт от LOG_FLASH_OFFSET  
-  uint8_t  reserved[496];  
+  uint32_t magic;  
+  uint32_t seq;  
+  uint32_t crc32;          // CRC32 всего слота (поле crc32 считается нулём)  
+  uint32_t log_write_ptr;  // позиция записи в LOG-области  
 };  
   
 // Глобальные настройки (парсятся из INFO.TXT)  
 extern String my_call_variable;  
 extern String my_qth_variable;  
 extern String my_text_variable;  
-extern String my_freq_rx_var;  
-extern String my_demod_var;  
+extern String my_freq_rx_var;      // частота приёма, Гц  
+extern String my_demod_var;        // "USB"/"LSB"/"RAW"/"AM"/"FM"  
 extern bool   debug_flag;  
-extern volatile bool pc_file_written;  
+extern volatile bool pc_file_written;   // ПК записал файл конфигурации  
   
-// Лимиты разгона / коррекция XOSC — определены в src/vfo/vfo.cpp,  
-// парсятся из SET.TXT. Применяются при следующем vfo_init() (ребут).  
+// Пределы разгона и коррекция XOSC (парсятся из SET.TXT).  
+// Определены в src/vfo/vfo.cpp; применяются при следующем vfo_init().  
 extern uint32_t vfo_max_clk_sys_hz;  
 extern uint32_t vfo_max_pll_vco_hz;  
 extern int32_t  vfo_xosc_corr_ppb;  
@@ -97,9 +94,6 @@ void read_and_parse_SET_txt();
 void remount_usb_disk();  
 void log_file_clear();  
 void log_file_write_line(String message);  
-void log_append(const uint8_t* data, uint32_t len);  
-void save_state();  
-bool load_state();  
   
 extern int32_t  current_active_slot;  
 extern uint32_t current_max_seq;  

@@ -2,12 +2,15 @@
 // состояний 8x32 КБ + LOG.TXT 256 КБ напрямую из flash (XIP).  
 // Flash пишется только при trx_state()==TRX_RX и только из главного цикла  
 // (check_and_handle_pc_changes) — в boot flash не стирается.  
+// Все flash-операции — через flash_safe_execute: Core 1 паркуется SDK,  
+// пока XIP отключён. Требуется flash_safe_execute_core_init() на Core 1.  
   
 #include "file_manager.h"  
 #include "../trx/trx_control.h"  
 #include <Adafruit_TinyUSB.h>  
 #include <hardware/flash.h>  
 #include <hardware/sync.h>  
+#include <pico/flash.h>   // flash_safe_execute  
   
 Adafruit_USBD_MSC usb_msc;  
   
@@ -29,7 +32,7 @@ bool pc_activity_detected = false;
 // маски: 0x01=sys(0-5), 0x02=INFO(6-21), 0x04=CONFIG(22-37), 0x08=SET(38-53)  
 volatile uint8_t pc_written_regions = 0;  
   
-static uint32_t log_write_ptr = 0;            // байт-смещение в LOG-области  
+static uint32_t log_write_ptr = 0;               // байт-смещение в LOG-области  
 static volatile bool state_save_pending = false; // отложенная первая запись  
 static bool usb_started = false;  
   
@@ -43,6 +46,31 @@ static uint32_t crc32_update(uint32_t crc, const uint8_t* p, uint32_t len) {
       crc = (crc >> 1) ^ (0xEDB88320u & (-(int32_t)(crc & 1)));  
   }  
   return crc;  
+}  
+  
+// ---------------------------------------------------------------------------  
+// Flash-операции с парковкой Core 1 (flash_safe_execute).  
+// xip_addr — адрес в окне XIP (XIP_BASE + offset).  
+// ---------------------------------------------------------------------------  
+static void do_flash_erase_4k(void* param) {  
+  uintptr_t xip_addr = (uintptr_t)param;  
+  flash_range_erase(xip_addr - XIP_BASE, FLASH_SECTOR_SIZE);  
+}  
+  
+struct FlashProgArgs { uintptr_t xip_addr; const uint8_t* data; uint32_t len; };  
+  
+static void do_flash_program(void* param) {  
+  const FlashProgArgs* a = (const FlashProgArgs*)param;  
+  flash_range_program(a->xip_addr - XIP_BASE, a->data, a->len);  
+}  
+  
+static void safe_flash_erase_4k(uintptr_t xip_addr) {  
+  flash_safe_execute(do_flash_erase_4k, (void*)xip_addr, 1000);  
+}  
+  
+static void safe_flash_program(uintptr_t xip_addr, const uint8_t* data, uint32_t len) {  
+  FlashProgArgs a = { xip_addr, data, len };  
+  flash_safe_execute(do_flash_program, &a, 1000);  
 }  
   
 // ---------------------------------------------------------------------------  
@@ -70,11 +98,11 @@ int32_t msc_write_cb(uint32_t lba, uint8_t* buffer, uint32_t bufsize) {
   memcpy(&ram_disk_buffer[lba * SECTOR_SIZE], buffer, bufsize);  
   last_msc_write_time = millis();  
   pc_activity_detected = true;  
-  if      (lba < INFO_LBA)    pc_written_regions |= 0x01;  
-  else if (lba < CONFIG_LBA)  pc_written_regions |= 0x02;  
-  else if (lba < SET_LBA)     pc_written_regions |= 0x04;  
-  else                        pc_written_regions |= 0x08;  
-  if (lba >= INFO_LBA) pc_file_written = true;  
+  if      (lba < INFO_LBA)   pc_written_regions |= 0x01;  
+  else if (lba < CONFIG_LBA) pc_written_regions |= 0x02;  
+  else if (lba < SET_LBA)    pc_written_regions |= 0x04;  
+  else                       pc_written_regions |= 0x08;  
+  if (lba >= INFO_LBA) pc_file_written = true;   // изменён файл конфигурации  
   return bufsize;  
 }  
   
@@ -94,31 +122,127 @@ static void set_fat12_entry(uint32_t fat_start_bytes, uint16_t cluster, uint16_t
   }  
 }  
   
-static void set_dir_timestamp(uint8_t dir_entry_idx) {  
-  uint32_t e = SECTOR_SIZE * (1 + FAT_SECTORS) + dir_entry_idx * 32;  // сектор 3  
-  uint16_t t = (12 << 11), d = ((2026 - 1980) << 9) | (1 << 5) | 1;  
-  ram_disk_buffer[e + 13] = 0;  
-  memcpy(&ram_disk_buffer[e + 14], &t, 2);  
-  memcpy(&ram_disk_buffer[e + 16], &d, 2);  
-  memcpy(&ram_disk_buffer[e + 18], &d, 2);  
-  memcpy(&ram_disk_buffer[e + 22], &t, 2);  
-  memcpy(&ram_disk_buffer[e + 24], &d, 2);  
+static void set_dir_timestamp(uint8_t* e) {  
+  // Статичные метки времени (RTC нет): 2024-01-01 00:00:00  
+  e[13] = 0; e[14] = 0;                       // create time (coarse)  
+  e[15] = 0; e[16] = 0; e[17] = 0;            // access date  
+  e[22] = 0; e[23] = 0;                       // write time  
+  e[24] = 0x21; e[25] = 0x54;                 // write date: 2024-01-01  
 }  
   
-static void dir_entry(uint8_t idx, const char* name8_3, uint8_t attr,  
-                      uint16_t cluster, uint32_t size) {  
-  uint32_t e = SECTOR_SIZE * (1 + FAT_SECTORS) + idx * 32;  
-  memset(&ram_disk_buffer[e], ' ', 11);  
-  memcpy(&ram_disk_buffer[e], name8_3, strlen(name8_3));  
-  ram_disk_buffer[e + 11] = attr;  
-  memcpy(&ram_disk_buffer[e + 26], &cluster, 2);  
-  memcpy(&ram_disk_buffer[e + 28], &size, 4);  
+static void dir_entry(uint8_t* e, const char* name11, uint8_t attr,  
+                      uint16_t first_cluster, uint32_t size) {  
+  memset(e, 0, 32);  
+  memcpy(e, name11, 11);  
+  e[11] = attr;  
+  set_dir_timestamp(e);  
+  e[26] = (uint8_t)(first_cluster & 0xFF);  
+  e[27] = (uint8_t)(first_cluster >> 8);  
+  e[28] = (uint8_t)(size & 0xFF);  
+  e[29] = (uint8_t)((size >> 8) & 0xFF);  
+  e[30] = (uint8_t)((size >> 16) & 0xFF);  
+  e[31] = (uint8_t)((size >> 24) & 0xFF);  
+}  
+  
+// ---------------------------------------------------------------------------  
+// Дефолтное содержимое файлов  
+// ---------------------------------------------------------------------------  
+static void fill_info_default() {  
+  char* p = (char*)&ram_disk_buffer[INFO_LBA * SECTOR_SIZE];  
+  memset(p, 0, INFO_MAX_BYTES);  
+  int n = snprintf(p, INFO_MAX_BYTES,  
+    "[CALL]%s[/CALL]\r\n"  
+    "[QTH]%s[/QTH]\r\n"  
+    "[TEXT]%s[/TEXT]\r\n"  
+    "[FREQ_RX]%s[/FREQ_RX]\r\n"  
+    "[DEMOD]%s[/DEMOD]\r\n"  
+    "[DEBUG]%d[/DEBUG]\r\n",  
+    my_call_variable.c_str(), my_qth_variable.c_str(),  
+    my_text_variable.c_str(), my_freq_rx_var.c_str(),  
+    my_demod_var.c_str(), (int)debug_flag);  
+  (void)n;  
+}  
+  
+static void fill_config_default() {  
+  char* p = (char*)&ram_disk_buffer[CONFIG_LBA * SECTOR_SIZE];  
+  memset(p, 0, CONFIG_MAX_BYTES);  
+  snprintf(p, CONFIG_MAX_BYTES,  
+    "# CONFIG.TXT — конфигурация радиомодема\r\n"  
+    "# (зарезервировано)\r\n");  
+}  
+  
+static void fill_set_default() {  
+  char* p = (char*)&ram_disk_buffer[SET_LBA * SECTOR_SIZE];  
+  memset(p, 0, SET_MAX_BYTES);  
+  snprintf(p, SET_MAX_BYTES,  
+    "# SET.TXT — скрытые данные: паспорт стабильности VFO\r\n"  
+    "[MAX_CLK_SYS]%lu[/MAX_CLK_SYS]\r\n"  
+    "[MAX_PLL_VCO]%lu[/MAX_PLL_VCO]\r\n"  
+    "[XOSC_PPB]%ld[/XOSC_PPB]\r\n",  
+    (unsigned long)vfo_max_clk_sys_hz,  
+    (unsigned long)vfo_max_pll_vco_hz,  
+    (long)vfo_xosc_corr_ppb);  
+}  
+  
+// ---------------------------------------------------------------------------  
+// Построение дефолтного диска (только RAM; flash — через state_save_pending)  
+// ---------------------------------------------------------------------------  
+void create_default_fat_with_info_file() {  
+  memset(ram_disk_buffer, 0, DISK_SIZE_BYTES);  
+  
+  // --- Boot sector / BPB (FAT12, 566 секторов, кластер = 1 сектор) ---  
+  uint8_t* b = ram_disk_buffer;  
+  b[0] = 0xEB; b[1] = 0x3C; b[2] = 0x90;  
+  memcpy(b + 3, "MSDOS5.0", 8);  
+  b[11] = 0x00; b[12] = 0x02;                 // bytes/sector = 512  
+  b[13] = 1;                                  // sectors/cluster  
+  b[14] = 1; b[15] = 0;                       // reserved = 1  
+  b[16] = 1;                                  // FAT count  
+  b[17] = 48; b[18] = 0;                      // root entries = 48 (3 сектора)  
+  b[19] = (uint8_t)(SECTOR_COUNT & 0xFF);     // totsec16 = 566  
+  b[20] = (uint8_t)(SECTOR_COUNT >> 8);  
+  b[21] = 0xF8;                               // media  
+  b[22] = FAT_SECTORS; b[23] = 0;             // FAT size = 2 сектора  
+  b[24] = 1; b[25] = 0;                       // spt  
+  b[26] = 1; b[27] = 0;                       // heads  
+  b[510] = 0x55; b[511] = 0xAA;  
+  
+  // --- FAT (LBA 1, 2 сектора) ---  
+  uint32_t fat = SECTOR_SIZE;  
+  ram_disk_buffer[fat + 0] = 0xF8;  
+  ram_disk_buffer[fat + 1] = 0xFF;  
+  ram_disk_buffer[fat + 2] = 0xFF;  
+  // Цепочки: INFO 2-17, CONFIG 18-33, SET 34-49, LOG 50-561  
+  for (uint16_t c = INFO_FIRST_CLUSTER;   c < CONFIG_FIRST_CLUSTER - 1; ++c)  
+    set_fat12_entry(fat, c, c + 1);  
+  set_fat12_entry(fat, CONFIG_FIRST_CLUSTER - 1, 0xFFF);  
+  for (uint16_t c = CONFIG_FIRST_CLUSTER; c < SET_FIRST_CLUSTER - 1; ++c)  
+    set_fat12_entry(fat, c, c + 1);  
+  set_fat12_entry(fat, SET_FIRST_CLUSTER - 1, 0xFFF);  
+  for (uint16_t c = SET_FIRST_CLUSTER;    c < LOG_FIRST_CLUSTER - 1; ++c)  
+    set_fat12_entry(fat, c, c + 1);  
+  set_fat12_entry(fat, LOG_FIRST_CLUSTER - 1, 0xFFF);  
+  for (uint16_t c = LOG_FIRST_CLUSTER; c < LOG_FIRST_CLUSTER + LOG_CLUSTERS - 1; ++c)  
+    set_fat12_entry(fat, c, c + 1);  
+  set_fat12_entry(fat, LOG_FIRST_CLUSTER + LOG_CLUSTERS - 1, 0xFFF);  
+  
+  // --- Корневой каталог (LBA 3-5): 4 записи ---  
+  uint8_t* d = &ram_disk_buffer[(1 + FAT_SECTORS) * SECTOR_SIZE];  
+  dir_entry(d +  0, "INFO    TXT", 0x20, INFO_FIRST_CLUSTER,   INFO_MAX_BYTES);  
+  dir_entry(d + 32, "CONFIG  TXT", 0x20, CONFIG_FIRST_CLUSTER, CONFIG_MAX_BYTES);  
+  dir_entry(d + 64, "SET     TXT", 0x20, SET_FIRST_CLUSTER,    SET_MAX_BYTES);  
+  dir_entry(d + 96, "LOG     TXT", 0x21, LOG_FIRST_CLUSTER,    LOG_MAX_BYTES);  
+  
+  fill_info_default();  
+  fill_config_default();  
+  fill_set_default();  
+  
+  state_save_pending = true;   // первая запись во flash — из главного цикла, в RX  
 }  
   
 // ---------------------------------------------------------------------------  
 // Кольцо слотов состояний (8 x 32 КБ @ 0x180000)  
 // ---------------------------------------------------------------------------  
-  
 // Источник байта слота по смещению (без буфера 32 КБ в RAM)  
 static const uint8_t* slot_src(uint32_t off, uint32_t* avail) {  
   if (off < SLOT_CONFIG_OFF) {           // INFO 8 КБ  
@@ -141,17 +265,19 @@ static const uint8_t* slot_src(uint32_t off, uint32_t* avail) {
     return nullptr;                      // нет активного слота — 0xFF  
   }  
   *avail = SLOT_SIZE - off;              // SlotMeta 512 Б  
-  return nullptr;                        // заполняется отдельно  
+  return nullptr;  
 }  
   
-// CRC слота, читаемого напрямую из flash (для load_state)  
-static uint32_t slot_crc_flash(const uint8_t* base) {  
+// CRC32 слота во flash (через XIP), поле crc32 считается нулём  
+static uint32_t slot_crc_flash(uint32_t slot_base_xip) {  
+  const uint8_t* base = (const uint8_t*)slot_base_xip;  
   uint32_t crc = 0xFFFFFFFFu;  
-  const uint32_t crc_off = SLOT_META_OFF + offsetof(SlotMeta, crc32);  
-  uint8_t zeros[4] = {0, 0, 0, 0};  
-  crc = crc32_update(crc, base, crc_off);  
-  crc = crc32_update(crc, zeros, 4);  
-  crc = crc32_update(crc, base + crc_off + 4, SLOT_SIZE - crc_off - 4);  
+  crc = crc32_update(crc, base, SLOT_META_OFF + offsetof(SlotMeta, crc32));  
+  uint8_t z[4] = {0};  
+  crc = crc32_update(crc, z, 4);  
+  crc = crc32_update(crc,  
+      base + SLOT_META_OFF + offsetof(SlotMeta, crc32) + 4,  
+      sizeof(SlotMeta) - offsetof(SlotMeta, crc32) - 4);  
   return ~crc;  
 }  
   
@@ -193,10 +319,13 @@ void save_state() {
   }  
   meta.crc32 = ~crc;  
   
-  // Проход 2: erase + program постранично  
+  // Проход 2: erase 8 блоков по 4 КБ + program постранично.  
+  // Каждая операция — через flash_safe_execute: Core 1 паркуется,  
+  // между вызовами XIP жив и Core 1 работает.  
   uint32_t target = RING_OFFSET + next_slot * SLOT_SIZE;  
-  uint32_t ints = save_and_disable_interrupts();  
-  flash_range_erase(target, SLOT_SIZE);            // 8 блоков по 4 КБ  
+  for (uint32_t e = 0; e < SLOT_SIZE; e += FLASH_SECTOR_SIZE)  
+    safe_flash_erase_4k(XIP_BASE + target + e);  
+  
   uint32_t off = 0;  
   while (off < SLOT_SIZE) {  
     uint8_t page[FLASH_PAGE_SIZE];  
@@ -215,10 +344,9 @@ void save_state() {
     } else {  
       memset(page, 0xFF, chunk);  
     }  
-    flash_range_program(target + off, page, chunk);  
+    safe_flash_program(XIP_BASE + target + off, page, chunk);  
     off += chunk;  
   }  
-  restore_interrupts(ints);  
   flash_flush_cache();  
   
   current_active_slot = next_slot;  
@@ -228,21 +356,22 @@ void save_state() {
 }  
   
 bool load_state() {  
-  int32_t best = -1; uint32_t best_seq = 0;  
-  for (int32_t s = 0; s < SLOTS; ++s) {  
-    const uint8_t* base =  
-        (const uint8_t*)(XIP_BASE + RING_OFFSET + s * SLOT_SIZE);  
+  int32_t best = -1;  
+  uint32_t best_seq = 0;  
+  for (int32_t i = 0; i < SLOTS; ++i) {  
+    uint32_t base = XIP_BASE + RING_OFFSET + i * SLOT_SIZE;  
     const SlotMeta* m = (const SlotMeta*)(base + SLOT_META_OFF);  
     if (m->magic != SLOT_MAGIC) continue;  
-    if (m->seq <= best_seq) continue;  
-    if (slot_crc_flash(base) != m->crc32) continue;   // битый слот  
-    best = s; best_seq = m->seq;  
+    if (slot_crc_flash(base) != m->crc32) continue;  // битый слот  
+    if (best == -1 || (int32_t)(m->seq - best_seq) > 0) {  
+      best = i;  
+      best_seq = m->seq;  
+    }  
   }  
-  if (best < 0) return false;  
+  if (best == -1) return false;  
   
-  const uint8_t* base =  
-      (const uint8_t*)(XIP_BASE + RING_OFFSET + best * SLOT_SIZE);  
-  memcpy(&ram_disk_buffer[INFO_LBA   * SECTOR_SIZE], base + SLOT_INFO_OFF,   SLOT_CONFIG_OFF - SLOT_INFO_OFF);  
+  const uint8_t* base = (const uint8_t*)(XIP_BASE + RING_OFFSET + best * SLOT_SIZE);  
+  memcpy(&ram_disk_buffer[INFO_LBA   * SECTOR_SIZE], base + 0,               SLOT_CONFIG_OFF);  
   memcpy(&ram_disk_buffer[CONFIG_LBA * SECTOR_SIZE], base + SLOT_CONFIG_OFF, SLOT_SET_OFF - SLOT_CONFIG_OFF);  
   memcpy(&ram_disk_buffer[SET_LBA    * SECTOR_SIZE], base + SLOT_SET_OFF,    SLOT_RESERVED_OFF - SLOT_SET_OFF);  
   
@@ -256,91 +385,9 @@ bool load_state() {
 }  
   
 // ---------------------------------------------------------------------------  
-// Дефолтный диск: BPB + FAT + каталог + содержимое файлов  
+// Парсеры файлов  
 // ---------------------------------------------------------------------------  
-static void create_default_fat_with_info_file() {  
-  memset(ram_disk_buffer, 0, DISK_SIZE_BYTES);  
-  
-  // --- Boot sector / BPB (FAT12, 566 секторов, кластер = 1 сектор) ---  
-  uint8_t* b = ram_disk_buffer;  
-  b[0] = 0xEB; b[1] = 0x3C; b[2] = 0x90;  
-  memcpy(&b[3], "MSDOS5.0", 8);  
-  b[11] = 0x00; b[12] = 0x02;              // bytes/sector = 512  
-  b[13] = 1;                               // sectors/cluster  
-  b[14] = 1;  b[15] = 0;                   // reserved = 1  
-  b[16] = 1;                               // FAT count  
-  b[17] = 48; b[18] = 0;                   // root entries = 48 (3 сектора)  
-  uint16_t tot = SECTOR_COUNT;  
-  memcpy(&b[19], &tot, 2);                 // total sectors (16-bit) = 566  
-  b[21] = 0xF8;                            // media  
-  b[22] = FAT_SECTORS; b[23] = 0;          // sectors/FAT = 2  
-  b[24] = 1;  b[25] = 0;                   // sectors/track  
-  b[26] = 1;  b[27] = 0;                   // heads  
-  b[36] = 0x80;                            // drive number  
-  b[38] = 0x29;                            // boot signature  
-  uint32_t vol = 0x20400603;  
-  memcpy(&b[39], &vol, 4);  
-  memcpy(&b[43], "RADIOMODEM ", 11);  
-  memcpy(&b[54], "FAT12   ", 8);  
-  b[510] = 0x55; b[511] = 0xAA;  
-  
-  // --- FAT (сектора 1-2) ---  
-  uint32_t fat = SECTOR_SIZE;              // FAT начинается с сектора 1  
-  ram_disk_buffer[fat + 0] = 0xF8;  
-  ram_disk_buffer[fat + 1] = 0xFF;  
-  ram_disk_buffer[fat + 2] = 0xFF;  
-  // Цепочки: INFO 2-17, CONFIG 18-33, SET 34-49, LOG 50-561  
-  for (uint16_t c = INFO_FIRST_CLUSTER;   c < INFO_FIRST_CLUSTER   + INFO_CLUSTERS   - 1; ++c) set_fat12_entry(fat, c, c + 1);  
-  set_fat12_entry(fat, INFO_FIRST_CLUSTER   + INFO_CLUSTERS   - 1, 0xFFF);  
-  for (uint16_t c = CONFIG_FIRST_CLUSTER; c < CONFIG_FIRST_CLUSTER + CONFIG_CLUSTERS - 1; ++c) set_fat12_entry(fat, c, c + 1);  
-  set_fat12_entry(fat, CONFIG_FIRST_CLUSTER + CONFIG_CLUSTERS - 1, 0xFFF);  
-  for (uint16_t c = SET_FIRST_CLUSTER;    c < SET_FIRST_CLUSTER    + SET_CLUSTERS    - 1; ++c) set_fat12_entry(fat, c, c + 1);  
-  set_fat12_entry(fat, SET_FIRST_CLUSTER    + SET_CLUSTERS    - 1, 0xFFF);  
-  for (uint16_t c = LOG_FIRST_CLUSTER;    c < LOG_FIRST_CLUSTER    + LOG_CLUSTERS    - 1; ++c) set_fat12_entry(fat, c, c + 1);  
-  set_fat12_entry(fat, LOG_FIRST_CLUSTER    + LOG_CLUSTERS    - 1, 0xFFF);  
-  
-  // --- Корневой каталог (сектора 3-5), 4 записи ---  
-  dir_entry(0, "INFO    TXT", 0x20, INFO_FIRST_CLUSTER,   0);  
-  dir_entry(1, "CONFIG  TXT", 0x20, CONFIG_FIRST_CLUSTER, 0);  
-  dir_entry(2, "SET     TXT", 0x20, SET_FIRST_CLUSTER,    0);  
-  dir_entry(3, "LOG     TXT", 0x21, LOG_FIRST_CLUSTER,    LOG_MAX_BYTES); // read-only  
-  for (uint8_t i = 0; i < 4; ++i) set_dir_timestamp(i);  
-  
-  // --- Содержимое файлов ---  
-  String info =  
-    "[CALL]"    + my_call_variable + "[/CALL]\r\n"  
-    "[QTH]"     + my_qth_variable  + "[/QTH]\r\n"  
-    "[TEXT]"    + my_text_variable + "[/TEXT]\r\n"  
-    "[FREQ_RX]" + my_freq_rx_var   + "[/FREQ_RX]\r\n"  
-    "[DEMOD]"   + my_demod_var     + "[/DEMOD]\r\n"  
-    "[DEBUG]0[/DEBUG]\r\n";  
-  memcpy(&ram_disk_buffer[INFO_LBA * SECTOR_SIZE], info.c_str(),  
-         info.length() < INFO_MAX_BYTES ? info.length() : INFO_MAX_BYTES);  
-  uint32_t* info_sz = (uint32_t*)&ram_disk_buffer[SECTOR_SIZE * (1 + FAT_SECTORS) + 0 * 32 + 28];  
-  *info_sz = info.length();  
-  
-  String config = "# CONFIG.TXT\r\n";  
-  memcpy(&ram_disk_buffer[CONFIG_LBA * SECTOR_SIZE], config.c_str(), config.length());  
-  uint32_t* cfg_sz = (uint32_t*)&ram_disk_buffer[SECTOR_SIZE * (1 + FAT_SECTORS) + 1 * 32 + 28];  
-  *cfg_sz = config.length();  
-  
-  String set =  
-    "# SET.TXT — скрытые данные\r\n"  
-    "[MAX_CLK_SYS]150000000[/MAX_CLK_SYS]\r\n"  
-    "[MAX_PLL_VCO]1500000000[/MAX_PLL_VCO]\r\n"  
-    "[XOSC_PPB]25000[/XOSC_PPB]\r\n"  
-    "# [SCAN] ... [/SCAN]\r\n";  
-  memcpy(&ram_disk_buffer[SET_LBA * SECTOR_SIZE], set.c_str(), set.length());  
-  uint32_t* set_sz = (uint32_t*)&ram_disk_buffer[SECTOR_SIZE * (1 + FAT_SECTORS) + 2 * 32 + 28];  
-  *set_sz = set.length();  
-  
-  // Первая запись во flash — отложена до RX в главном цикле  
-  state_save_pending = true;  
-}  
-  
-// ---------------------------------------------------------------------------  
-// Парсер тегов [TAG]...[/TAG] внутри области файла  
-// ---------------------------------------------------------------------------  
+// Поиск [tag]...[/tag] внутри области файла, без выхода за её границы  
 static String tag_value_at(uint32_t lba, uint32_t area_len, const char* tag) {  
   char open[32], close[36];  
   snprintf(open,  sizeof(open),  "[%s]", tag);  
@@ -355,7 +402,8 @@ static String tag_value_at(uint32_t lba, uint32_t area_len, const char* tag) {
   for (const char* c = p; c + strlen(close) <= end; ++c)  
     if (!memcmp(c, close, strlen(close))) { e = c; break; }  
   if (!e) return "";  
-  String s; s.reserve(e - p);  
+  String s;  
+  s.reserve(e - p);  
   for (const char* c = p; c < e; ++c)  
     if (*c >= 32 && *c <= 126) s += *c;  
   s.trim();  
@@ -364,66 +412,66 @@ static String tag_value_at(uint32_t lba, uint32_t area_len, const char* tag) {
   
 void read_and_parse_INFO_txt() {  
   String v;  
-  if ((v = tag_value_at(INFO_LBA, INFO_MAX_BYTES, "CALL"))   .length()) my_call_variable = v;  
-  if ((v = tag_value_at(INFO_LBA, INFO_MAX_BYTES, "QTH"))    .length()) my_qth_variable  = v;  
-  if ((v = tag_value_at(INFO_LBA, INFO_MAX_BYTES, "TEXT"))   .length()) my_text_variable = v;  
+  if ((v = tag_value_at(INFO_LBA, INFO_MAX_BYTES, "CALL")).length())    my_call_variable = v;  
+  if ((v = tag_value_at(INFO_LBA, INFO_MAX_BYTES, "QTH")).length())     my_qth_variable  = v;  
+  if ((v = tag_value_at(INFO_LBA, INFO_MAX_BYTES, "TEXT")).length())    my_text_variable = v;  
   if ((v = tag_value_at(INFO_LBA, INFO_MAX_BYTES, "FREQ_RX")).length()) my_freq_rx_var   = v;  
-  if ((v = tag_value_at(INFO_LBA, INFO_MAX_BYTES, "DEMOD"))  .length()) my_demod_var     = v;  
+  if ((v = tag_value_at(INFO_LBA, INFO_MAX_BYTES, "DEMOD")).length())   my_demod_var     = v;  
   debug_flag = (tag_value_at(INFO_LBA, INFO_MAX_BYTES, "DEBUG") == "1");  
 }  
   
 void read_and_parse_CONFIG_txt() {  
-  // TODO: теги CONFIG.TXT по мере появления  
+  // Зарезервировано: теги CONFIG.TXT добавляются по мере появления параметров.  
 }  
   
 void read_and_parse_SET_txt() {  
   String v;  
   if ((v = tag_value_at(SET_LBA, SET_MAX_BYTES, "MAX_CLK_SYS")).length())  
-    vfo_max_clk_sys_hz = (uint32_t)v.toInt();  
+    vfo_max_clk_sys_hz = (uint32_t)strtoul(v.c_str(), nullptr, 10);  
   if ((v = tag_value_at(SET_LBA, SET_MAX_BYTES, "MAX_PLL_VCO")).length())  
     vfo_max_pll_vco_hz = (uint32_t)strtoul(v.c_str(), nullptr, 10);  
   if ((v = tag_value_at(SET_LBA, SET_MAX_BYTES, "XOSC_PPB")).length())  
     vfo_xosc_corr_ppb = (int32_t)v.toInt();  
-  // TODO: scan-таблица [SCAN]  
 }  
   
 void print_current_settings() {  
-  Serial.printf("[FM] call=%s qth=%s f_rx=%s demod=%s debug=%d\n",  
+  Serial.printf("[FM] CALL=%s QTH=%s FREQ_RX=%s DEMOD=%s DEBUG=%d\n",  
                 my_call_variable.c_str(), my_qth_variable.c_str(),  
                 my_freq_rx_var.c_str(), my_demod_var.c_str(), (int)debug_flag);  
+  Serial.printf("[FM] MAX_CLK_SYS=%lu MAX_PLL_VCO=%lu XOSC_PPB=%ld\n",  
+                (unsigned long)vfo_max_clk_sys_hz,  
+                (unsigned long)vfo_max_pll_vco_hz,  
+                (long)vfo_xosc_corr_ppb);  
 }  
   
 // ---------------------------------------------------------------------------  
 // LOG.TXT — кольцевая запись во flash @0x140000, страницами 256 Б  
 // ---------------------------------------------------------------------------  
 static void log_boot_recover_ptr() {  
-  // Скан первого 0xFF-блока (4 КБ) — указатель на начало свободного блока  
+  // Скан первого полностью пустого (0xFF) 4-КБ блока  
   const uint8_t* base = (const uint8_t*)(XIP_BASE + LOG_FLASH_OFFSET);  
+  log_write_ptr = 0;  
   for (uint32_t off = 0; off < LOG_MAX_BYTES; off += FLASH_SECTOR_SIZE) {  
     if (base[off] == 0xFF) { log_write_ptr = off; return; }  
   }  
-  log_write_ptr = 0;   // область полна — начнём кольцо заново  
+  log_write_ptr = 0;   // область полна — начнём с начала (кольцо)  
 }  
   
 void log_append(const uint8_t* data, uint32_t len) {  
-  if (trx_state() != TRX_RX) return;          // flash пишем только на приёме  
+  if (trx_state() != TRX_RX) return;   // flash пишем только на приёме  
   uint32_t off = 0;  
   while (off < len) {  
-    if (log_write_ptr >= LOG_MAX_BYTES) log_write_ptr = 0;   // wrap  
-    // erase 4 КБ-блока при входе в новый блок  
-    if ((log_write_ptr % FLASH_SECTOR_SIZE) == 0) {  
-      uint32_t ints = save_and_disable_interrupts();  
-      flash_range_erase(LOG_FLASH_OFFSET + log_write_ptr, FLASH_SECTOR_SIZE);  
-      restore_interrupts(ints);  
-    }  
+    if (log_write_ptr >= LOG_MAX_BYTES) log_write_ptr = 0;   // кольцо  
+    if ((log_write_ptr % FLASH_SECTOR_SIZE) == 0)  
+      safe_flash_erase_4k(XIP_BASE + LOG_FLASH_OFFSET + log_write_ptr);  
     uint32_t room = FLASH_PAGE_SIZE - (log_write_ptr % FLASH_PAGE_SIZE);  
-    uint32_t n = len - off; if (n > room) n = room;  
+    uint32_t n = len - off;  
+    if (n > room) n = room;  
     alignas(4) uint8_t page[FLASH_PAGE_SIZE];  
     memset(page, 0xFF, sizeof(page));  
     memcpy(page, data + off, n);  
-    uint32_t ints = save_and_disable_interrupts();  
-    flash_range_program(LOG_FLASH_OFFSET + log_write_ptr, page, FLASH_PAGE_SIZE);  
-    restore_interrupts(ints);  
+    safe_flash_program(XIP_BASE + LOG_FLASH_OFFSET + log_write_ptr,  
+                       page, FLASH_PAGE_SIZE);  
     log_write_ptr += FLASH_PAGE_SIZE;   // указатель всегда на границе страницы  
     off += n;  
   }  
@@ -438,9 +486,8 @@ void log_file_write_line(String message) {
   
 void log_file_clear() {  
   if (trx_state() != TRX_RX) return;  
-  uint32_t ints = save_and_disable_interrupts();  
-  flash_range_erase(LOG_FLASH_OFFSET, LOG_MAX_BYTES);  
-  restore_interrupts(ints);  
+  for (uint32_t off = 0; off < LOG_MAX_BYTES; off += FLASH_SECTOR_SIZE)  
+    safe_flash_erase_4k(XIP_BASE + LOG_FLASH_OFFSET + off);  
   flash_flush_cache();  
   log_write_ptr = 0;  
 }  
@@ -490,8 +537,7 @@ void force_reset_to_default_disk() {
 void check_and_handle_pc_changes() {  
   // Отложенная первая запись состояния + заголовок сессии в LOG.  
   // Выполняется только в RX, когда система полностью инициализирована.  
-  if (state_save_pending) {  
-    if (trx_state() != TRX_RX) return;  
+  if (state_save_pending && trx_state() == TRX_RX) {  
     state_save_pending = false;  
     save_state();  
     String hdr = "\r\n=== session start, seq=" + String(current_max_seq) + " ===\r\n";  
