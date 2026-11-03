@@ -4,7 +4,8 @@
 #include "jtty.h"  
 #include "../../rx/rx_decoders.h"         // rx_decoders_emit  
 #include "../../rx/rx_goertzel.h"         // gb_init_ex, gb_push_ex  
-  
+#include "../../mem/mem_arena.h"          // mem_arena_alloc, MEM_PHASE_RX
+
 #include <Arduino.h>  
 #include <math.h>  
 #include <stdint.h>  
@@ -68,8 +69,8 @@ static uint8_t g_sync_tones[JTTY_SYNC_HISTORY];
 static int g_sync_write = 0;  
 static int g_sync_count = 0;  
   
-static float g_data_power[JTTY_NDATA][JTTY_NTONES];  
-static float g_dec_power[JTTY_NDATA][JTTY_NTONES];  // snapshot for the decoder  
+static float (*g_data_power)[JTTY_NTONES] = nullptr;  
+static float (*g_dec_power)[JTTY_NTONES]  = nullptr;  // snapshot for the decoder
 static int g_data_count = 0;  
 static int g_hops_since_sync = 0;  
   
@@ -105,11 +106,57 @@ static uint32_t g_last_atom_ms = 0;   // millis() of the last appended atom
 // Frames are ~1.9 s apart; 4 s covers one missed frame plus margin.  
 static constexpr uint32_t JTTY_MSG_IDLE_MS = 4000;  
   
-// Viterbi working memory. A byte per state/step is compact and avoids  
-// heap allocation; bit 0 records which predecessor's high state bit won.  
-static float g_metric_a[JTTY_NSTATES];  
-static float g_metric_b[JTTY_NSTATES];  
-static uint8_t g_predecessor[JTTY_INFO_BITS][JTTY_NSTATES];  
+// Viterbi working memory — в mem_arena (MEM_PHASE_RX). Выделяется одним  
+// бамп-блоком на Core 0 при входе в моды; освобождается сбросом RX-пула  
+// при смене моды (rx_decoders.cpp) и при trx_switch. A byte per state/step;  
+// bit 0 records which predecessor's high state bit won.  
+static float   *g_metric_a     = nullptr;  
+static float   *g_metric_b     = nullptr;  
+static uint8_t (*g_predecessor)[JTTY_NSTATES] = nullptr;  
+static uint32_t g_arena_gen    = 0;  // поколение TRX-пула, на котором выделен блок
+  
+#define JTTY_ARENA_BYTES ((size_t)JTTY_NDATA  * JTTY_NTONES * sizeof(float) * 2u + \
+                          (size_t)JTTY_NSTATES * sizeof(float) * 2u +            \
+                          (size_t)JTTY_INFO_BITS * JTTY_NSTATES * sizeof(uint8_t))
+  
+// Идемпотентно: повторные rx_init (ретюн на той же моде) не перетекают пул.  
+// Поколение mem_arena_trx_gen() — единственный критерий валидности:  
+// после mem_arena_switch (RX->TX->RX) или release (смена моды) блок  
+// инвалидирован, указатели перевыделяются.  
+static bool jtty_tables_alloc(void) {  
+    if (g_predecessor && g_arena_gen == mem_arena_trx_gen()) {  
+        return true;                    // блок жив — переиспользуем  
+    }  
+    g_data_power = g_dec_power = nullptr;  
+    g_metric_a = g_metric_b = nullptr;  
+    g_predecessor = nullptr;            // старый блок инвалидирован — забыть  
+  
+    uint8_t* base = (uint8_t*)mem_arena_alloc(MEM_PHASE_RX, JTTY_ARENA_BYTES, 8);
+    if (!base) {  
+        Serial.printf("[JTTY] mem_arena: нет %u B в RX-пуле\n",  
+                      (unsigned)JTTY_ARENA_BYTES);  
+        return false;  
+    }  
+    memset(base, 0, JTTY_ARENA_BYTES);  
+  
+    float* fp = (float*)base;  
+    g_data_power  = (float(*)[JTTY_NTONES])fp; fp += JTTY_NDATA * JTTY_NTONES;  
+    g_dec_power   = (float(*)[JTTY_NTONES])fp; fp += JTTY_NDATA * JTTY_NTONES;  
+    g_metric_a    = fp; fp += JTTY_NSTATES;  
+    g_metric_b    = fp; fp += JTTY_NSTATES;  
+    g_predecessor = (uint8_t(*)[JTTY_NSTATES])fp;  // 8-байтное выравнивание базы сохранено  
+    g_arena_gen = mem_arena_trx_gen();  
+    return true;  
+}
+  
+// Вызывается из jtty_rx_stop() после сброса g_active — указатели инвалидны,  
+// сам блок освобождает mem_arena_release/switch.  
+static void jtty_tables_free(void) {  
+    g_data_power = g_dec_power = nullptr;  
+    g_metric_a = g_metric_b = nullptr;  
+    g_predecessor = nullptr;  
+    g_arena_gen = 0;  
+}
   
 // Tone index from the two convolutionally encoded bits:  
 // b0,b1 = 00,01,10,11 -> tone 0,1,3,2.  
@@ -254,7 +301,7 @@ static bool jtty_vit_step_quanta(const float power[JTTY_NDATA][JTTY_NTONES],
     }  
   
     // Step complete: commit metrics.  
-    memcpy(g_metric_a, g_metric_b, sizeof(g_metric_a));  
+    memcpy(g_metric_a, g_metric_b, JTTY_NSTATES * sizeof(float));
     g_dec_state_i = 0;  
     return true;  
 }  
@@ -333,7 +380,8 @@ static bool jtty_dec_service(void)
 // Launch the resumable decode on the collected frame.  
 static void jtty_dec_start(void)  
 {  
-    memcpy(g_dec_power, g_data_power, sizeof(g_dec_power));  // ~0.1 ms, once per frame  
+    memcpy(g_dec_power, g_data_power,  
+           (size_t)JTTY_NDATA * JTTY_NTONES * sizeof(float));  // ~0.1 ms, once per frame
     for (int s = 0; s < JTTY_NSTATES; ++s) {  
         g_metric_a[s] = 0.0f;  
     }  
@@ -531,6 +579,12 @@ void jtty_rx_init(uint32_t center_hz)
         return;  
     }  
   
+    // Таблицы декодера — в RX-арене (~29 КБ). Выделяем на Core 0 после  
+    // mem_arena_release в rx_decoders.cpp; при нехватке мода не стартует.  
+    if (!jtty_tables_alloc()) {  
+        return;   // g_active остаётся false — мода не активна  
+    }  
+  
     Serial.printf("[JTTY] init center=%ld base=%ld tones=%u step=%ld baud=%ld\n",  
                   (long)center_hz,  
                   (long)(base_hz + 0.5f),  
@@ -538,7 +592,7 @@ void jtty_rx_init(uint32_t center_hz)
                   (long)(JTTY_TONE_STEP + 0.5f),  
                   (long)(JTTY_FS_HZ / JTTY_SPS + 0.5f));  
   
-    g_active = true;  
+    g_active = true;
 }  
   
 void jtty_rx_stop(void)  
@@ -553,9 +607,10 @@ void jtty_rx_stop(void)
   
     jtty_clear_sync_history();  
     jtty_message_clear();  
+    jtty_tables_free();  
   
     // Do not call gb_reset() here: the Goertzel bank is shared globally and  
-    // may already have been reconfigured by the decoder dispatcher.  
+    // may already have been reconfigured by the decoder dispatcher.
 }  
   
 void jtty_rx_push(int16_t sample)  
@@ -563,6 +618,12 @@ void jtty_rx_push(int16_t sample)
     if (!g_active) {  
         return;  
     }  
+  
+    // Ленивая реаллокация: после trx_switch/mem_arena_release gen сменился,  
+    // указатели инвалидированы — перевыделяем здесь (Core 0, RX-фаза активна).  
+    if (g_arena_gen != mem_arena_trx_gen() && !jtty_tables_alloc()) {  
+        return;                     // нет памяти — пропускаем, лог уже в alloc  
+    }
   
     float power[JTTY_NTONES];  
     if (!gb_push_ex(sample, power)) {  

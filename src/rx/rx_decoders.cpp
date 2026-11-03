@@ -16,6 +16,7 @@
 #include "../modes/contestia/contestia.h" // contestia_rx_stop
 #include "../modes/jtty/jtty.h" // jtty_rx_stop
 #include "../modes/ifkp/ifkp.h"   // ifkp_rx_stop
+#include "../mem/mem_arena.h"            // mem_arena_release, MEM_PHASE_RX
   
 static const ModeIface* active_mode = 0;  
 static RxModeId         active_rx   = RX_MODE_NONE;  
@@ -85,12 +86,16 @@ void rx_decoders_set_mode(RxModeId id) {
         case RX_MODE_IFKP:     mid = MODE_IFKP; break;
         default:             mid = MODE_NONE;   break;  
     }  
-    const ModeIface* m = modes_get(mid);  
-    if (active_mode && m != active_mode)  
-        stop_active_decoder();  
-    active_mode = m;  
-    active_rx   = (m ? id : RX_MODE_NONE);  
-    if (m && m->rx_init) m->rx_init(0);  
+    const ModeIface* m = modes_get(mid);    
+    if (active_mode && m != active_mode) {    
+        stop_active_decoder();           // зануляет указатели таблиц (jtty_tables_free)  
+        // В RX-пуле только таблицы мод — сброс безопасен (DSP/RSID/DMA static).  
+        // Строго ПОСЛЕ stop и ДО rx_init: иначе утечка bump-пула ~29 КБ на смену.  
+        mem_arena_release(MEM_PHASE_RX);    
+    }    
+    active_mode = m;    
+    active_rx   = (m ? id : RX_MODE_NONE);    
+    if (m && m->rx_init) m->rx_init(0);
     Serial.printf("[DEC] mode -> %s\n", m ? m->name : "none");  
 }  
   
@@ -110,12 +115,14 @@ void rx_decoders_on_rsid(uint16_t code) {
   
     uint32_t center = (uint32_t)(rsid_last_freq_hz() + 0.5f);  
   
-    if (m != active_mode) {  
-        stop_active_decoder();          // сброс предыдущей моды  
-        active_mode = m;  
-        active_rx   = rx_id_for(m->id);  
-        if (m->rx_init) m->rx_init(center);  
-    } else if (m->rx_init) {  
+    if (m != active_mode) {    
+        stop_active_decoder();          // сброс предыдущей моды    
+        // В RX-пуле только таблицы мод — сброс пула перед rx_init новой.  
+        mem_arena_release(MEM_PHASE_RX);    
+        active_mode = m;    
+        active_rx   = rx_id_for(m->id);    
+        if (m->rx_init) m->rx_init(center);    
+    } else if (m->rx_init) {
         m->rx_init(center);             // та же мода — перецентровка тона  
     }  
     Serial.printf("[DEC] rsid -> %s center=%lu\n",  

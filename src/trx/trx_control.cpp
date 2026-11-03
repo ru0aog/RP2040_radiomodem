@@ -73,12 +73,13 @@ static volatile uint32_t s_pending_freq = 0;
 static volatile bool     s_req_active   = false;  
 static volatile bool     s_req_done     = false;  
   
-extern "C" {  
-__attribute__((weak)) void rx_pipeline_stop(void)  {}  
-__attribute__((weak)) void rx_pipeline_start(void) {}  
-__attribute__((weak)) void tx_pipeline_stop(void)  {}  
-__attribute__((weak)) void tx_pipeline_start(void) {}  
-}  
+extern "C" {    
+__attribute__((weak)) void rx_pipeline_stop(void)              {}    
+__attribute__((weak)) void rx_pipeline_start(void)             {}    
+__attribute__((weak)) void rx_pipeline_set_freq(uint32_t hz)   {}    
+__attribute__((weak)) void tx_pipeline_stop(void)              {}    
+__attribute__((weak)) void tx_pipeline_start(void)             {}    
+}
   
 void trx_init(TrxVfoHook vfo_hook) {  
   s_vfo        = vfo_hook;  
@@ -109,8 +110,12 @@ void trx_poll_core1(void) {
   
   if (s_vfo) s_vfo(target, freq);   // внутри — парковка Core 0 по флагам  
   
-  if (target == TRX_TX) tx_pipeline_start();  
-  else                  rx_pipeline_start();  
+  if (target == TRX_TX) {    
+    tx_pipeline_start();    
+  } else {    
+    rx_pipeline_set_freq(freq);    // запрос из trx_switch — единственный источник    
+    rx_pipeline_start();    
+  }
   
   s_state = target;  
   __dmb();  

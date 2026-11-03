@@ -1,5 +1,5 @@
 git add .
-git commit -m "Кратко напишите, что изменилось"
+git commit -m "Update"
 git push origin main
 
 git diff origin/main

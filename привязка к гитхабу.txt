@@ -1,0 +1,24 @@
+﻿1. Должен быть установлен гит https://git-scm.com/install/windows
+
+2. из VSCode терминала:
+создать папку для проекта mkdir C:\VSCodePortable\my_projects
+перейти в эту папку cd C:\VSCodePortable\my_projects
+склонировать репозиторий git clone https://github.com/ru0aog/RP2040_radiomodem
+
+3. Открыть проект
+Файл -> Открыть папку (Open Folder) и выберите скачанную папку C:\VSCodePortable\my_projects\RP2040_radiomodem
+
+Выйти из ограниченного режима:
+- управление
+- в доверенной папке
+
+4. зарегистрироваться на гите
+git config --global user.email "ваша_почта@example.com"
+git config --global user.name "Ваш_Логин_На_GitHub"
+
+5. Отправка кода на гит
+git add .
+git commit -m "Опишите, что изменили на новой машине"
+git push origin main
+
+Первый раз нужно будет подтвердить двухфакторной авторизацией

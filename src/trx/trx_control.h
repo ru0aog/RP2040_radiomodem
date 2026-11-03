@@ -49,9 +49,10 @@ bool     trx_is_transmitting(void);    // удобно для PTT-индикац
 // автономно. При появлении реальных реализаций линкер подставит их.  
 // Вызываются ИСКЛЮЧИТЕЛЬНО на Core 1 и только из trx_poll_core1().  
 // ============================================================================  
-extern "C" {  
-void rx_pipeline_stop(void);   // глушит ADC/DMA, DDC  
-void rx_pipeline_start(void);  // поднимает capture, чистые таблицы из арены  
-void tx_pipeline_stop(void);   // глушит PIO/DDS  
-void tx_pipeline_start(void);  // поднимает модулятор  
+extern "C" {    
+void rx_pipeline_stop(void);             // глушит ADC/DMA, DDC    
+void rx_pipeline_set_freq(uint32_t hz);  // частота следующего запуска RX (из trx_switch)    
+void rx_pipeline_start(void);            // поднимает capture, чистые таблицы из арены    
+void tx_pipeline_stop(void);             // глушит PIO/DDS    
+void tx_pipeline_start(void);            // поднимает модулятор    
 }

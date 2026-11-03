@@ -11,9 +11,9 @@
 // g_metric_*, g_predecessor, TX-буферы символов) переводятся на  
 // mem_arena_alloc() при переносе модулей — API стабилен с первого коммита.  
 // ============================================================================  
-#ifndef MEM_TRX_POOL_SIZE  
-#define MEM_TRX_POOL_SIZE    (96u * 1024u)   // общая область RX|TX  
-#endif  
+#ifndef MEM_TRX_POOL_SIZE    
+#define MEM_TRX_POOL_SIZE    (36u * 1024u)   // общая область RX|TX: JTTY 29120 Б + запас    
+#endif
 #ifndef MEM_SHARED_POOL_SIZE  
 #define MEM_SHARED_POOL_SIZE  (8u * 1024u)   // настройки, расписание, CAT  
 #endif  
@@ -26,14 +26,19 @@ static size_t   s_shared_off   = 0;
 static size_t   s_trx_high_wm  = 0;      // водяной знак за всё время  
 static MemPhase s_active       = MEM_PHASE_RX;  
 static bool     s_initialized  = false;  
+static volatile uint32_t s_trx_gen = 0;  // поколение TRX-пула: ++ на каждом  
+                                         // сбросе — указатели декодеров  
+                                         // инвалидируются, если их сохранённый  
+                                         // gen != mem_arena_trx_gen()
   
 void mem_arena_init(void) {  
   s_trx_offset  = 0;  
   s_shared_off  = 0;  
   s_trx_high_wm = 0;  
   s_active      = MEM_PHASE_RX;  
+  s_trx_gen     = 0;  
   s_initialized = true;  
-}  
+}
   
 void *mem_arena_alloc(MemPhase phase, size_t size, size_t align) {  
   MEM_ASSERT(s_initialized);  
@@ -75,7 +80,8 @@ void mem_arena_release(MemPhase phase) {
   // Область RX/TX общая — сброс действует независимо от того, какая  
   // фаза её занимала. Водяной знак НЕ сбрасываем: это диагностика.  
   s_trx_offset = 0;  
-}  
+  ++s_trx_gen;                    // все выданные указатели инвалидированы  
+}
   
 void mem_arena_switch(MemPhase phase) {  
   MEM_ASSERT(s_initialized);  
@@ -84,8 +90,9 @@ void mem_arena_switch(MemPhase phase) {
   // Уходящая фаза полностью освобождает общую область —  
   // единственная точка, где фаза меняется.  
   s_trx_offset = 0;  
+  ++s_trx_gen;                    // выданные указатели уходящей фазы мертвы  
   s_active = phase;  
-}  
+}
   
 size_t mem_arena_watermark(void) { return s_trx_high_wm; }  
   
@@ -99,3 +106,5 @@ size_t mem_arena_used(MemPhase phase) {
 }  
   
 MemPhase mem_arena_active_phase(void) { return s_active; }
+
+uint32_t mem_arena_trx_gen(void) { return s_trx_gen; }
