@@ -27,6 +27,7 @@
 #include "src/cat/cat.h"
 #include "src/modem/modem.h"
 #include "src/filesys/file_manager.h"
+#include "src/trx/tx_job.h"
   
 // ============================================================================  
 // Флаг-протокол парковки Core 0 (объекты в src/trx/trx_control.cpp).  
@@ -157,6 +158,7 @@ void loop() {
   }  
   
   cat_poll();                     // разбор команд с основного CDC, разделитель ';'
+  tx_job_poll();
   rx_decoders_poll();
   rsid_poll();                 // печать "# RSID ..." + автопереключение моды
   check_and_handle_pc_changes();
