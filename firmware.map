@@ -3441,6 +3441,7 @@ Discarded input sections
  .comment       0x00000000       0x13 .pio/build/pico/lib7bb/I2S/I2S.cpp.o
  .ARM.attributes
                 0x00000000       0x2c .pio/build/pico/lib7bb/I2S/I2S.cpp.o
+<<<<<<< HEAD
  .text          0x00000000        0x0 .pio/build/pico/lib66f/audio-tools/AudioTools/CoreAudio/AudioRuntime.cpp.o
  .data          0x00000000        0x0 .pio/build/pico/lib66f/audio-tools/AudioTools/CoreAudio/AudioRuntime.cpp.o
  .bss           0x00000000        0x0 .pio/build/pico/lib66f/audio-tools/AudioTools/CoreAudio/AudioRuntime.cpp.o
@@ -3449,6 +3450,16 @@ Discarded input sections
  .comment       0x00000000       0x13 .pio/build/pico/lib66f/audio-tools/AudioTools/CoreAudio/AudioRuntime.cpp.o
  .ARM.attributes
                 0x00000000       0x2c .pio/build/pico/lib66f/audio-tools/AudioTools/CoreAudio/AudioRuntime.cpp.o
+=======
+ .text          0x00000000        0x0 .pio/build/pico/libd95/audio-tools/AudioTools/CoreAudio/AudioRuntime.cpp.o
+ .data          0x00000000        0x0 .pio/build/pico/libd95/audio-tools/AudioTools/CoreAudio/AudioRuntime.cpp.o
+ .bss           0x00000000        0x0 .pio/build/pico/libd95/audio-tools/AudioTools/CoreAudio/AudioRuntime.cpp.o
+ .text.startup._GLOBAL__sub_I_AudioRuntime.cpp
+                0x00000000        0x2 .pio/build/pico/libd95/audio-tools/AudioTools/CoreAudio/AudioRuntime.cpp.o
+ .comment       0x00000000       0x13 .pio/build/pico/libd95/audio-tools/AudioTools/CoreAudio/AudioRuntime.cpp.o
+ .ARM.attributes
+                0x00000000       0x2c .pio/build/pico/libd95/audio-tools/AudioTools/CoreAudio/AudioRuntime.cpp.o
+>>>>>>> a412d757c4d675588aca8809323ff0d3a73e41c4
  .text          0x00000000        0x0 .pio/build/pico/src/RP2040_radiomodem.cpp.o
  .data          0x00000000        0x0 .pio/build/pico/src/RP2040_radiomodem.cpp.o
  .bss           0x00000000        0x0 .pio/build/pico/src/RP2040_radiomodem.cpp.o
@@ -11474,7 +11485,11 @@ LOAD .pio/build/pico/lib012/AudioBufferManager/AudioBufferManager.cpp.o
 LOAD .pio/build/pico/libabe/PWMAudio/PWMAudio.cpp.o
 LOAD .pio/build/pico/lib5c4/Ticker/Ticker.cpp.o
 LOAD .pio/build/pico/lib7bb/I2S/I2S.cpp.o
+<<<<<<< HEAD
 LOAD .pio/build/pico/lib66f/audio-tools/AudioTools/CoreAudio/AudioRuntime.cpp.o
+=======
+LOAD .pio/build/pico/libd95/audio-tools/AudioTools/CoreAudio/AudioRuntime.cpp.o
+>>>>>>> a412d757c4d675588aca8809323ff0d3a73e41c4
 LOAD .pio/build/pico/src/RP2040_radiomodem.cpp.o
 LOAD .pio/build/pico/src/src/cat/cat.cpp.o
 LOAD .pio/build/pico/src/src/filesys/file_manager.cpp.o
