@@ -116,16 +116,48 @@ static void dir_entry(uint8_t idx, const char* name8_3, uint8_t attr,
 // ---------------------------------------------------------------------------  
 // Кольцо слотов состояний (8 x 32 КБ @ 0x180000)  
 // ---------------------------------------------------------------------------  
-static uint32_t slot_crc(const uint8_t* img) {  
-  // CRC по всему слоту, поле crc32 считается нулём  
-  uint32_t crc = 0xFFFFFFFFu;  
-  const uint32_t crc_off = SLOT_META_OFF + offsetof(SlotMeta, crc32);  
-  for (uint32_t i = 0; i < SLOT_SIZE; ++i) {  
-    uint8_t v = (i >= crc_off && i < crc_off + 4) ? 0 : img[i];  
-    crc ^= v;  
+static uint32_t crc32_update(uint32_t crc, const uint8_t* p, uint32_t len) {  
+  for (uint32_t i = 0; i < len; ++i) {  
+    crc ^= p[i];  
     for (int b = 0; b < 8; ++b)  
       crc = (crc >> 1) ^ (0xEDB88320u & (-(int32_t)(crc & 1)));  
   }  
+  return crc;  
+}  
+  
+// Источник байта слота по смещению (без буфера 32 КБ в RAM)  
+static const uint8_t* slot_src(uint32_t off, uint32_t* avail) {  
+  if (off < SLOT_CONFIG_OFF) {           // INFO 8 КБ  
+    *avail = SLOT_CONFIG_OFF - off;  
+    return &ram_disk_buffer[INFO_LBA * SECTOR_SIZE] + off;  
+  }  
+  if (off < SLOT_SET_OFF) {              // CONFIG 8 КБ  
+    *avail = SLOT_SET_OFF - off;  
+    return &ram_disk_buffer[CONFIG_LBA * SECTOR_SIZE] + (off - SLOT_CONFIG_OFF);  
+  }  
+  if (off < SLOT_RESERVED_OFF) {         // SET 8 КБ  
+    *avail = SLOT_RESERVED_OFF - off;  
+    return &ram_disk_buffer[SET_LBA * SECTOR_SIZE] + (off - SLOT_SET_OFF);  
+  }  
+  if (off < SLOT_META_OFF) {             // RESERVED 7.5 КБ — из текущего слота  
+    *avail = SLOT_META_OFF - off;  
+    if (current_active_slot >= 0)  
+      return (const uint8_t*)(XIP_BASE + RING_OFFSET +  
+             current_active_slot * SLOT_SIZE + off);  
+    return nullptr;                      // нет активного слота — 0xFF  
+  }  
+  *avail = SLOT_SIZE - off;              // SlotMeta 512 Б  
+  return nullptr;                        // заполняется отдельно  
+}  
+  
+// CRC слота, читаемого напрямую из flash (для load_state)  
+static uint32_t slot_crc_flash(const uint8_t* base) {  
+  uint32_t crc = 0xFFFFFFFFu;  
+  const uint32_t crc_off = SLOT_META_OFF + offsetof(SlotMeta, crc32);  
+  uint8_t zeros[4] = {0, 0, 0, 0};  
+  crc = crc32_update(crc, base, crc_off);  
+  crc = crc32_update(crc, zeros, 4);  
+  crc = crc32_update(crc, base + crc_off + 4, SLOT_SIZE - crc_off - 4);  
   return ~crc;  
 }  
   
@@ -134,33 +166,62 @@ void save_state() {
   uint32_t next_seq  = current_max_seq + 1;  
   if (current_active_slot == -1) { next_slot = 0; next_seq = 1; }  
   
-  static uint8_t img[SLOT_SIZE];  
-  memset(img, 0xFF, sizeof(img));  
+  // SlotMeta в маленьком буфере  
+  SlotMeta meta;  
+  memset(&meta, 0xFF, sizeof(meta));  
+  meta.magic         = SLOT_MAGIC;  
+  meta.seq           = next_seq;  
+  meta.crc32         = 0;  
+  meta.log_write_ptr = log_write_ptr;  
   
-  // Области файлов из RAM-диска  
-  memcpy(img + SLOT_INFO_OFF,   &ram_disk_buffer[INFO_LBA   * SECTOR_SIZE], INFO_MAX_BYTES);  
-  memcpy(img + SLOT_CONFIG_OFF, &ram_disk_buffer[CONFIG_LBA * SECTOR_SIZE], CONFIG_MAX_BYTES);  
-  memcpy(img + SLOT_SET_OFF,    &ram_disk_buffer[SET_LBA    * SECTOR_SIZE], SET_MAX_BYTES);  
-  
-  // RESERVED — из текущего активного слота (если есть)  
-  if (current_active_slot >= 0) {  
-    memcpy(img + SLOT_RESERVED_OFF,  
-           (const uint8_t*)(XIP_BASE + RING_OFFSET +  
-                            current_active_slot * SLOT_SIZE + SLOT_RESERVED_OFF),  
-           SLOT_RESERVED_SIZE);  
+  // Проход 1: CRC по всему слоту (crc32 считается нулём)  
+  uint32_t crc = 0xFFFFFFFFu;  
+  {  
+    uint32_t off = 0;  
+    while (off < SLOT_META_OFF) {  
+      uint32_t avail;  
+      const uint8_t* src = slot_src(off, &avail);  
+      if (src) crc = crc32_update(crc, src, avail);  
+      else {  // RESERVED без активного слота — 0xFF  
+        static const uint8_t ff[256] = {[0 ... 255] = 0xFF};  
+        for (uint32_t n = avail; n; n -= (n > 256 ? 256 : n))  
+          crc = crc32_update(crc, ff, n > 256 ? 256 : n);  
+      }  
+      off += avail;  
+    }  
+    crc = crc32_update(crc, (const uint8_t*)&meta, offsetof(SlotMeta, crc32));  
+    uint8_t z[4] = {0};  
+    crc = crc32_update(crc, z, 4);  
+    crc = crc32_update(crc, (const uint8_t*)&meta + offsetof(SlotMeta, crc32) + 4,  
+                       sizeof(SlotMeta) - offsetof(SlotMeta, crc32) - 4);  
   }  
+  meta.crc32 = ~crc;  
   
-  SlotMeta* meta = (SlotMeta*)(img + SLOT_META_OFF);  
-  meta->magic         = SLOT_MAGIC;  
-  meta->seq           = next_seq;  
-  meta->crc32         = 0;  
-  meta->log_write_ptr = log_write_ptr;  
-  meta->crc32         = slot_crc(img);  
-  
+  // Проход 2: erase + program постранично  
   uint32_t target = RING_OFFSET + next_slot * SLOT_SIZE;  
   uint32_t ints = save_and_disable_interrupts();  
   flash_range_erase(target, SLOT_SIZE);            // 8 блоков по 4 КБ  
-  flash_range_program(target, img, SLOT_SIZE);  
+  uint32_t off = 0;  
+  while (off < SLOT_SIZE) {  
+    uint8_t page[FLASH_PAGE_SIZE];  
+    uint32_t avail;  
+    const uint8_t* src = slot_src(off, &avail);  
+    uint32_t chunk = avail < FLASH_PAGE_SIZE ? avail : FLASH_PAGE_SIZE;  
+    if (off >= SLOT_META_OFF) {  
+      uint32_t mo = off - SLOT_META_OFF;  
+      chunk = FLASH_PAGE_SIZE;  
+      memset(page, 0xFF, chunk);  
+      uint32_t n = sizeof(SlotMeta) - mo;  
+      if (n > chunk) n = chunk;  
+      memcpy(page, (const uint8_t*)&meta + mo, n);  
+    } else if (src) {  
+      memcpy(page, src, chunk);  
+    } else {  
+      memset(page, 0xFF, chunk);  
+    }  
+    flash_range_program(target + off, page, chunk);  
+    off += chunk;  
+  }  
   restore_interrupts(ints);  
   flash_flush_cache();  
   
@@ -168,7 +229,7 @@ void save_state() {
   current_max_seq     = next_seq;  
   Serial.printf("[FM] save_state: slot=%ld seq=%lu\n",  
                 (long)next_slot, (unsigned long)next_seq);  
-}  
+}
   
 bool load_state() {  
   int32_t best = -1; uint32_t best_seq = 0;  
@@ -177,7 +238,7 @@ bool load_state() {
         (const uint8_t*)(XIP_BASE + RING_OFFSET + s * SLOT_SIZE);  
     const SlotMeta* m = (const SlotMeta*)(base + SLOT_META_OFF);  
     if (m->magic != SLOT_MAGIC || m->seq <= best_seq) continue;  
-    if (slot_crc(base) != m->crc32) continue;        // битый слот  
+    if (slot_crc_flash(base) != m->crc32) continue;        // битый слот
     best = s; best_seq = m->seq;  
   }  
   if (best < 0) return false;  
@@ -277,31 +338,35 @@ static void create_default_fat_with_info_file() {
 // ---------------------------------------------------------------------------  
 // Парсер тегов [TAG]...[/TAG]  
 // ---------------------------------------------------------------------------  
-static String tag_value_at(uint32_t lba, const char* tag) {  
+static String tag_value_at(uint32_t lba, uint32_t area_len, const char* tag) {  
   char open[32], close[36];  
   snprintf(open,  sizeof(open),  "[%s]", tag);  
   snprintf(close, sizeof(close), "[/%s]", tag);  
   const char* base = (const char*)&ram_disk_buffer[lba * SECTOR_SIZE];  
-  const char* p = strstr(base, open);  
+  const char* end  = base + area_len;  
+  const char* p = nullptr;  
+  for (const char* c = base; c + strlen(open) <= end; ++c)  
+    if (!memcmp(c, open, strlen(open))) { p = c + strlen(open); break; }  
   if (!p) return "";  
-  p += strlen(open);  
-  const char* e = strstr(p, close);  
+  const char* e = nullptr;  
+  for (const char* c = p; c + strlen(close) <= end; ++c)  
+    if (!memcmp(c, close, strlen(close))) { e = c; break; }  
   if (!e) return "";  
   String s; s.reserve(e - p);  
   for (const char* c = p; c < e; ++c)  
     if (*c >= 32 && *c <= 126) s += *c;  
   s.trim();  
   return s;  
-}  
+}
   
 void read_and_parse_INFO_txt() {  
   String v;  
-  if ((v = tag_value_at(INFO_LBA, "CALL"))   .length()) my_call_variable = v;  
-  if ((v = tag_value_at(INFO_LBA, "QTH"))    .length()) my_qth_variable  = v;  
-  if ((v = tag_value_at(INFO_LBA, "TEXT"))   .length()) my_text_variable = v;  
-  if ((v = tag_value_at(INFO_LBA, "FREQ_RX")).length()) my_freq_rx_var   = v;  
-  if ((v = tag_value_at(INFO_LBA, "DEMOD"))  .length()) my_demod_var     = v;  
-  debug_flag = (tag_value_at(INFO_LBA, "DEBUG") == "1");  
+  if ((v = tag_value_at(INFO_LBA, INFO_MAX_BYTES, "CALL"))   .length()) my_call_variable = v;  
+  if ((v = tag_value_at(INFO_LBA, INFO_MAX_BYTES, "QTH"))    .length()) my_qth_variable  = v;  
+  if ((v = tag_value_at(INFO_LBA, INFO_MAX_BYTES, "TEXT"))   .length()) my_text_variable = v;  
+  if ((v = tag_value_at(INFO_LBA, INFO_MAX_BYTES, "FREQ_RX")).length()) my_freq_rx_var   = v;  
+  if ((v = tag_value_at(INFO_LBA, INFO_MAX_BYTES, "DEMOD"))  .length()) my_demod_var     = v;  
+  debug_flag = (tag_value_at(INFO_LBA, INFO_MAX_BYTES, "DEBUG") == "1");  
 }  
   
 void read_and_parse_CONFIG_txt() {  
@@ -310,14 +375,13 @@ void read_and_parse_CONFIG_txt() {
   
 void read_and_parse_SET_txt() {  
   String v;  
-  if ((v = tag_value_at(SET_LBA, "MAX_CLK_SYS")).length())  
+  if ((v = tag_value_at(SET_LBA, SET_MAX_BYTES, "MAX_CLK_SYS")).length())  
     vfo_max_clk_sys_hz = (uint32_t)v.toInt();  
-  if ((v = tag_value_at(SET_LBA, "MAX_PLL_VCO")).length())  
+  if ((v = tag_value_at(SET_LBA, SET_MAX_BYTES, "MAX_PLL_VCO")).length())  
     vfo_max_pll_vco_hz = (uint32_t)strtoul(v.c_str(), nullptr, 10);  
-  if ((v = tag_value_at(SET_LBA, "XOSC_PPB")).length())  
+  if ((v = tag_value_at(SET_LBA, SET_MAX_BYTES, "XOSC_PPB")).length())  
     vfo_xosc_corr_ppb = (int32_t)v.toInt();  
-  // TODO: scan-таблица [SCAN]  
-}  
+}
   
 void print_current_settings() {  
   Serial.printf("[FM] call=%s qth=%s f_rx=%s demod=%s debug=%d\n",  
@@ -338,27 +402,29 @@ static void log_boot_recover_ptr() {
 }  
   
 void log_append(const uint8_t* data, uint32_t len) {  
-  if (trx_state() != TRX_RX) return;          // flash пишем только на приёме  
+  if (trx_state() != TRX_RX) return;  
   uint32_t off = 0;  
   while (off < len) {  
-    if (log_write_ptr >= LOG_MAX_BYTES) log_write_ptr = 0;   // wrap  
-    // erase 4 КБ-блока при входе в новый блок  
+    if (log_write_ptr >= LOG_MAX_BYTES) log_write_ptr = 0;  
     if ((log_write_ptr % FLASH_SECTOR_SIZE) == 0) {  
       uint32_t ints = save_and_disable_interrupts();  
       flash_range_erase(LOG_FLASH_OFFSET + log_write_ptr, FLASH_SECTOR_SIZE);  
       restore_interrupts(ints);  
     }  
-    uint32_t chunk = FLASH_PAGE_SIZE - (log_write_ptr % FLASH_PAGE_SIZE);  
-    if (chunk > len - off) chunk = len - off;  
+    uint32_t room = FLASH_PAGE_SIZE - (log_write_ptr % FLASH_PAGE_SIZE);  
+    uint32_t n = len - off; if (n > room) n = room;  
+    alignas(4) uint8_t page[FLASH_PAGE_SIZE];  
+    memset(page, 0xFF, sizeof(page));  
+    memcpy(page, data + off, n);  
     uint32_t ints = save_and_disable_interrupts();  
-    flash_range_program(LOG_FLASH_OFFSET + log_write_ptr, data + off, chunk);  
+    flash_range_program(LOG_FLASH_OFFSET + log_write_ptr, page, FLASH_PAGE_SIZE);  
     restore_interrupts(ints);  
-    log_write_ptr += chunk;  
-    off += chunk;  
+    log_write_ptr += FLASH_PAGE_SIZE;   // указатель всегда на границе страницы  
+    off += n;  
   }  
   flash_flush_cache();  
   remount_usb_disk();  
-}  
+}
   
 void log_file_write_line(String message) {  
   String line = message + "\r\n";  
