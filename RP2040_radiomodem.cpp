@@ -48,7 +48,7 @@ volatile bool core1_pll_done = false;
 void setup() {
   init_usb_msc_interface();   // до маунта TinyUSB — иначе хост диск не увидит 
 
-  usb_audio_init();            // регистрируем UAC-интерфейс ДО mount
+  //usb_audio_init();            // регистрируем UAC-интерфейс ДО mount
 
   Serial.begin(115200);
 
