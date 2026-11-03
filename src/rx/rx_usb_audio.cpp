@@ -385,48 +385,35 @@ static USBAudioStream usb_out;
 static int16_t pcm_buffer[192 * 2];  
   
 void usb_audio_init(void) {
-    agc_avg_q16 = (int64_t)4096 << 16;
+    Serial.println("[UAC] init: enter");
+
+    agc_avg_q16  = (int64_t)4096 << 16;
     lim_peak_q16 = (int64_t)2048 << 16;
 
     memset(pcm_buffer, 0, sizeof(pcm_buffer));
     push_demod_to_core1();
 
-    // Инициализация TinyUSB.
-    if (!TinyUSBDevice.isInitialized()) {
-        TinyUSBDevice.begin(0);
-    }
+    Serial.printf("[UAC] TinyUSB initialized=%d mounted=%d\n",
+                  (int)TinyUSBDevice.isInitialized(),
+                  (int)TinyUSBDevice.mounted());
 
-    // Конфигурация USB Audio Class 2.0.
     auto cfg = usb_out.defaultConfig(TX_MODE);
-
     cfg.sample_rate     = 44100;
     cfg.channels        = 2;
     cfg.bits_per_sample = 16;
 
-    // Регистрируем аудиоинтерфейс.
-    if (!usb_out.begin(cfg)) {
-        Serial.println("[UAC] ERROR: usb_out.begin() failed");
+    Serial.println("[UAC] before usb_out.begin");
+
+    const bool ok = usb_out.begin(cfg);
+
+    Serial.printf("[UAC] after usb_out.begin: %d\n", (int)ok);
+
+    if (!ok) {
+        Serial.println("[UAC] ERROR: registration failed");
         return;
     }
 
-    Serial.println("[UAC] Audio interface initialized");
-
-
-
-    // Важно: если USB уже перечислен хостом,
-    // переподключаем устройство, чтобы Windows
-    // заново прочитала конфигурацию и аудиодескрипторы.
-    if (TinyUSBDevice.mounted()) {
-        Serial.println("[UAC] Re-enumerating USB...");
-
-        TinyUSBDevice.detach();
-        delay(10);
-        TinyUSBDevice.attach();
-    }
-
-    Serial.println("[UAC] init 44100/16/stereo");
-
-Serial.println("[UAC] Re-enumeration skipped");
+    Serial.println("[UAC] registration OK");
 }
 
 
