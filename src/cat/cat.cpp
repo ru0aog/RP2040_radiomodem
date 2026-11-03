@@ -6,6 +6,7 @@
 #include "../rx/rx_dsp.h"  
 #include "../rx/rx_usb_audio.h"
 #include "../vfo/quad_vfo/quad_vfo.h"   // quad_vfo_set_quiet
+#include "cli.h"
 #include <Adafruit_TinyUSB.h>  
 #include <stdio.h>  
 #include <string.h>  
@@ -163,11 +164,20 @@ void cat_poll(void) {
     cat_prev_dtr = dtr;  
     while (Serial.available() > 0) {  
         char c = (char)Serial.read();  
-        if (c == ';') { cat_buf[cat_len] = '\0'; cat_execute(cat_buf); cat_len = 0; }  
-        else if (c != '\r' && c != '\n') {  
+        if (c == ';') {                                  // CAT-команда  
+            cat_buf[cat_len] = '\0';  
+            cat_execute(cat_buf);  
+            cat_len = 0;  
+        } else if (c == '\n') {                          // CLI-строка  
+            if (cat_len > 0) {  
+                cat_buf[cat_len] = '\0';  
+                cli_execute(cat_buf);  
+                cat_len = 0;  
+            }  
+        } else if (c != '\r') {  
             if (cat_len < CAT_BUF_MAX-1) cat_buf[cat_len++] = c; else cat_len = 0;  
         }  
     }  
-}  
+}
   
 void cat_set_freq_hz(uint32_t hz) { s_rx_hz = hz; }

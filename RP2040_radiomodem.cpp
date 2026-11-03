@@ -162,9 +162,9 @@ void loop() {
   check_and_handle_pc_changes();
   usb_audio_poll();            // выкачиваем аудио-очередь rx_dsp -> UAC
   
-  // --- Пульс-строка раз в 60 сек ---  
+  // --- Пульс-строка раз в 10 сек ---  
   static uint32_t t_stat = 0;  
-  if (millis() - t_stat > 60000) {  
+  if (millis() - t_stat > 10000) {  
     t_stat = millis();  
     Serial.printf("arena watermark: %u / %u B | state=%s | tone=%u | "  
                   "clk_sys=%lu Hz\n",  
