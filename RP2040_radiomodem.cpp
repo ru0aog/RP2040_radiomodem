@@ -49,16 +49,13 @@ void setup() {
 
   init_usb_msc_interface();   // до маунта TinyUSB — иначе хост диск не увидит
 
+  usb_audio_init();            // регистрируем UAC-интерфейс ДО mount
+
   Serial.begin(115200);
 
   while (!Serial && millis() < 5000) delay(1);
 
   
- 
-
-  //usb_audio_init();            // регистрируем UAC-интерфейс ДО mount
-
-
 
   cat_init();                     // выведет "[CAT] init: shared CDC port" и armed cat_enabled  
   init_file_manager();            // загрузка образа из Flash или default-диск
@@ -165,7 +162,7 @@ void loop() {
   cat_poll();                     // разбор команд с основного CDC, разделитель ';'
   rx_decoders_poll();
   rsid_poll();                 // печать "# RSID ..." + автопереключение моды
-  //check_and_handle_pc_changes();
+  check_and_handle_pc_changes();
   //usb_audio_poll();            // выкачиваем аудио-очередь rx_dsp -> UAC
   
   // --- Пульс-строка раз в 60 сек ---  

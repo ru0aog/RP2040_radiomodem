@@ -385,6 +385,9 @@ static USBAudioStream usb_out;
 static int16_t pcm_buffer[192 * 2];  
   
 void usb_audio_init(void) {
+
+    return;
+    
     agc_avg_q16 = (int64_t)4096 << 16;
     lim_peak_q16 = (int64_t)2048 << 16;
 
