@@ -27,6 +27,7 @@
 #include "src/cat/cat.h"
 #include "src/modem/modem.h"
 #include "src/filesys/file_manager.h"
+#include <pico/flash.h>
   
 // ============================================================================  
 // Флаг-протокол парковки Core 0 (объекты в src/trx/trx_control.cpp).  
@@ -197,6 +198,9 @@ void loop() {
 void setup1() {  
   while (!core0_ready) tight_loop_contents();  
   
+  // В начале setup1(), до запуска RX/DSP:
+  //flash_safe_execute_core_init();
+
   // Стартовый RX: VFO-hook → quad_vfo → set_clk_sys → разгон 337.5 МГц.  
   // Паркует Core 0 флаг-протоколом (Core 0 уже в while(!core1_pll_done)  
   // с core0_park_poll — handshake обслуживается).  
