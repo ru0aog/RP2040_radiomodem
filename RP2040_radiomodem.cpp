@@ -1,13 +1,14 @@
 // RP2040_radiomodem.cpp
 //
-// USB MSC + USB CDC CAT + VFO + RX DSP.
+// RP2040_radiomodem
+// USB MSC + USB CDC CAT + VFO + RX DSP
 //
 // Core 0:
 //   USB, файловый менеджер, CAT, LED.
-//   Обслуживание парковки Core 0 при изменении тактовой частоты.
+//   Обслуживание парковки Core 0 при изменении clk_sys.
 //
 // Core 1:
-//   Flash-safe init, VFO, ADC/DMA, RX DSP.
+//   Flash safety, VFO, ADC/DMA, RX DSP.
 //
 // CAT: ID; FA; IF;
 // Изменение частоты через CAT пока отключено.
@@ -31,17 +32,33 @@
 extern void core0_park_poll(void);
 
 // -----------------------------------------------------------------------------
-// Синхронизация ядер
+// Synchronization
 // -----------------------------------------------------------------------------
 
 static volatile bool flash_safe_ready = false;
 static volatile bool core0_ready = false;
 static volatile bool core1_ready = false;
 
+// Диагностический этап запуска Core 1:
+//
+// 0 — setup1 ещё не начат
+// 1 — выполняется flash_safe_execute_core_init()
+// 2 — Flash safety инициализирован
+// 3 — ожидание готовности Core 0
+// 4 — настройка VFO
+// 5 — запуск DSP
+// 6 — запуск ADC/DMA
+// 7 — инициализация завершена
+//
+// Если stage постоянно равен 1, зависание происходит
+// внутри flash_safe_execute_core_init().
+
+static volatile uint32_t core1_stage = 0;
+
 static constexpr uint32_t START_FREQ_HZ = 3602000UL;
 
 // -----------------------------------------------------------------------------
-// Минимальный CAT: команды чтения
+// CAT — команды чтения
 // -----------------------------------------------------------------------------
 
 static char cat_buf[32];
@@ -55,9 +72,7 @@ static void cat_send(const char* text)
         return;
     }
 
-    // Не проверяем Serial.dtr():
-    // некоторые терминалы не устанавливают DTR,
-    // хотя COM-порт открыт и команды поступают.
+    // Не требуем DTR от терминала.
     Serial.write(
         reinterpret_cast<const uint8_t*>(text),
         strlen(text)
@@ -99,9 +114,8 @@ static void cat_execute(const char* cmd)
         return;
     }
 
-    // Перестройка частоты пока не разрешена.
-    // Для безопасной реализации требуется межъядерный
-    // механизм перестройки через TRX-контроллер.
+    // Перестройка частоты через CAT пока отключена.
+    // Для неё необходим отдельный запрос к TRX-контроллеру.
     if (strncmp(cmd, "FA", 2) == 0) {
         cat_send("?;");
         return;
@@ -117,7 +131,9 @@ static void cat_poll_readonly()
 
         if (c == ';') {
             cat_buf[cat_len] = '\0';
+
             cat_execute(cat_buf);
+
             cat_len = 0;
         }
         else if (c != '\r' && c != '\n') {
@@ -125,8 +141,7 @@ static void cat_poll_readonly()
                 cat_buf[cat_len++] = c;
             }
             else {
-                // Переполнение буфера:
-                // сбрасываем неполную команду.
+                // Переполнение буфера — сброс команды.
                 cat_len = 0;
             }
         }
@@ -142,41 +157,34 @@ void setup()
     pinMode(LED_BUILTIN, OUTPUT);
     digitalWrite(LED_BUILTIN, LOW);
 
-    // Сохраняем последовательность инициализации USB MSC,
-    // которая уже работала в диагностической прошивке.
+    // Не добавлять flash_safe_execute_core_init() сюда:
+    // предыдущая версия с этим вызовом перестала запускаться.
+    //
+    // Сохраняем последовательность инициализации USB,
+    // при которой диск и COM-порт определялись.
+
     init_usb_msc_interface();
 
     Serial.begin(115200);
 
-    // Инициализация памяти.
     mem_arena_init();
 
-    // Инициализация файлового менеджера и восстановление
-    // сохранённого состояния виртуального диска.
     init_file_manager();
 
     Serial.println();
+    Serial.println("[BOOT] RP2040_radiomodem");
     Serial.println("[BOOT] USB MSC + CAT + VFO + RX DSP");
-    Serial.println("[CAT] Commands: ID; FA; IF;");
 
-    // Инициализация VFO.
     vfo_init();
 
-    // Подготовка таблиц и фильтров DSP.
     rx_dsp_init();
 
-    // Подключаем VFO к TRX-контроллеру.
     trx_init(vfo_on_trx_switch);
 
-    // Сообщаем Core 1, что подготовка Core 0 завершена.
     __dmb();
     core0_ready = true;
+    __dmb();
 
-    // ВАЖНО:
-    // Не ждём здесь core1_ready.
-    // Если запуск VFO или ADC/DMA на Core 1 зависнет,
-    // Core 0 всё равно должен продолжать обслуживать
-    // LED, CAT и файловый менеджер.
     Serial.println("[BOOT] Core 0 ready");
 }
 
@@ -186,12 +194,12 @@ void setup()
 
 void loop()
 {
-    // Обязательно обслуживаем запросы парковки Core 0,
-    // которые возникают при изменении тактовой частоты VFO.
+    // Обслуживание парковки Core 0 при изменении тактовой частоты VFO.
     core0_park_poll();
 
     static uint32_t last_blink = 0;
     static uint32_t last_status = 0;
+
     static bool led_state = false;
     static bool core1_reported = false;
 
@@ -209,29 +217,31 @@ void loop()
         );
     }
 
-    // Сообщение о завершении инициализации Core 1.
     if (core1_ready && !core1_reported) {
         core1_reported = true;
         Serial.println("[BOOT] Core 1 initialized");
     }
 
-    // Обработка изменений виртуального диска.
-    // Функция самостоятельно определяет, когда нужно
-    // сохранять изменения во Flash.
+    // Сохранение виртуального диска разрешается только после
+    // инициализации Flash safety на Core 1.
+    //
+    // Пока Core 1 зависает на этапе 1, эта функция не вызывается.
+    // Поэтому сохранение CONFIG.TXT этим кодом не исправлено.
     if (flash_safe_ready) {
         check_and_handle_pc_changes();
     }
 
-    // Обработка CAT-команд.
     cat_poll_readonly();
 
-    // Диагностика DSP раз в секунду.
+    // Диагностика раз в секунду.
     if (static_cast<uint32_t>(now - last_status) >= 1000) {
         last_status = now;
 
         Serial.printf(
-            "[STATUS] Core1=%u DSP_drop=%lu AUD_drop=%lu clip=%lu\n",
+            "[STATUS] Core1=%u stage=%lu "
+            "DSP_drop=%lu AUD_drop=%lu clip=%lu\n",
             core1_ready ? 1U : 0U,
+            static_cast<unsigned long>(core1_stage),
             static_cast<unsigned long>(rx_dsp_out_dropped()),
             static_cast<unsigned long>(rx_dsp_aud_dropped()),
             static_cast<unsigned long>(rx_dsp_clip_count())
@@ -245,37 +255,54 @@ void loop()
 
 void setup1()
 {
-    // Подготовка Core 1 для безопасной работы с Flash.
-    flash_safe_execute_core_init();
-
+    // Этап 1: диагностика.
+    core1_stage = 1;
     __dmb();
-    flash_safe_ready = true;
 
-    // Ожидаем готовности Core 0.
-    // Core 0 в это время завершает setup().
+    // ВРЕМЕННО ПРОПУСКАЕМ:
+    // flash_safe_execute_core_init();
+    //
+    // По диагностике именно этот вызов блокирует Core 1.
+
+    // Важно: flash_safe_ready НЕ устанавливаем!
+    // До решения проблемы запрещаем операции сохранения во Flash.
+
+    core1_stage = 2;
+    __dmb();
+
+    // Этап 3: ожидание готовности Core 0.
+    core1_stage = 3;
+    __dmb();
+
     while (!core0_ready) {
         tight_loop_contents();
     }
 
-    Serial.println("[VFO] Initializing RX LO");
+    // Этап 4: VFO.
+    core1_stage = 4;
+    __dmb();
 
-    // Первичная настройка гетеродина.
-    // Core 0 продолжает обслуживать core0_park_poll()
-    // из loop(), если изменение тактовой частоты потребует
-    // парковки основного ядра.
     vfo_on_trx_switch(TRX_RX, START_FREQ_HZ);
 
-    // Запуск DSP-приёмника на начальной частоте.
+    // Этап 5: DSP.
+    core1_stage = 5;
+    __dmb();
+
     rx_dsp_start(START_FREQ_HZ);
 
-    // Запуск захвата АЦП/DMA после подготовки DSP.
+    // Этап 6: ADC/DMA.
+    core1_stage = 6;
+    __dmb();
+
     rx_capture_start();
 
-    // Публикуем начальную частоту для CAT.
     cat_freq_hz = START_FREQ_HZ;
 
+    // Этап 7: запуск завершён.
     __dmb();
     core1_ready = true;
+    core1_stage = 7;
+    __dmb();
 
     vfo_quad_debug();
 
@@ -288,14 +315,11 @@ void setup1()
 
 void loop1()
 {
-    // Обработка запросов переключения RX/TX.
     trx_poll_core1();
 
-    // Обработка DSP только в режиме приёма.
     if (trx_state() == TRX_RX) {
         rx_dsp_poll();
     }
 
-    // Обслуживание VFO.
     vfo_poll();
 }
