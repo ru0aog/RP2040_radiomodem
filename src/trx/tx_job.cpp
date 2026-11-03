@@ -62,7 +62,7 @@ void tx_job_poll(void) {
         } else if (mi && mi->tx_frame) {  
             // Блокирующая передача кадра (как send_*_string в маяке).  
             // Внутри tx_frame желательна проверка tx_job_state()==TXJ_ABORTED.  
-            mi->tx_frame(s_job.payload, strlen(s_job.payload));  
+            mi->tx_frame((const uint8_t*)s_job.payload, strlen(s_job.payload));
         }  
   
         // Гарантированный возврат в RX — как в маяке.  
@@ -76,7 +76,8 @@ void tx_job_poll(void) {
     case TXJ_DONE:  
     case TXJ_ABORTED:  
     case TXJ_ERROR:  
-        s_job.state = TXJ_IDLE;   // однократный показ результата  
+        // Состояние держим до явного сброса — команда "tx" покажет результат.  
+        // Сброс в IDLE происходит при следующем tx_job_submit(). 
         break;  
   
     default:  
