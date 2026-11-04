@@ -195,4 +195,6 @@ void log_file_write_line(String message);
 
 void file_manager_set_flash_safe_ready(bool ready);
 
+void file_manager_core1_init(void);
+
 #endif // FILE_MANAGER_H

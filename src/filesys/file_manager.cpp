@@ -1402,16 +1402,20 @@ void check_and_handle_pc_changes(void)
             return;
         }
 
-        save_state();
-
-        // save_state() may return without writing if Flash safety
-        // is not enabled. Keep the pending flag in that case.
-        if (current_active_slot < 0 ||
-            current_max_seq == 0) {
-            return;
-        }
-
-        state_save_pending = false;
+        save_state();  
+  
+        // save_state() may return without writing if Flash safety  
+        // is not enabled. Keep the pending flag in that case.  
+        if (current_active_slot < 0 ||  
+            current_max_seq == 0) {  
+            return;  
+        }  
+  
+        state_save_pending = false;  
+  
+        Serial.printf("[FM] state saved: slot=%ld seq=%lu\n",  
+                      (long)current_active_slot,  
+                      (unsigned long)current_max_seq);
 
         String hdr =
             "\r\n=== session start, seq=" +
@@ -1442,14 +1446,19 @@ void check_and_handle_pc_changes(void)
         return;
     }
 
-    pc_activity_detected = false;
-
-    const uint8_t regions = pc_written_regions;
-
-    pc_written_regions = 0;
-
-    save_state();
-
+    pc_activity_detected = false;  
+  
+    const uint8_t regions = pc_written_regions;  
+  
+    pc_written_regions = 0;  
+  
+    save_state();  
+  
+    Serial.printf("[FM] state saved: slot=%ld seq=%lu regions=0x%02X\n",  
+                  (long)current_active_slot,  
+                  (unsigned long)current_max_seq,  
+                  (unsigned)regions);  
+  
     if (regions & 0x02) {
         read_and_parse_INFO_txt();
     }
@@ -1465,4 +1474,11 @@ void check_and_handle_pc_changes(void)
     remount_usb_disk();
 
     pc_file_written = false;
+}
+
+// Вызывается из setup1() на Core 1 ДО начала работы DSP.  
+// Инициализирует парковку для flash_safe_execute и разрешает flash-записи.  
+void file_manager_core1_init(void) {  
+    flash_safe_execute_core_init();  
+    flash_safe_ready = true;   // внутренний флаг модуля, снаружи не трогаем  
 }

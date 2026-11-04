@@ -92,12 +92,12 @@ void setup() {
   // set_clk_sys с флаг-парковкой; без poll() парк уйдёт в PARK TIMEOUT.  
   // В этой точке на Core 0 — пустой цикл без USB: живой TinyUSB-стек  
   // во время парковки кладёт handshake (был завис на "before park").  
-  while (!core1_pll_done) {  
-    core0_park_poll();  
-    tight_loop_contents();  
-  }  
-  
-  Serial.println("[DBG] setup done");  
+  while (!core1_pll_done) {    
+    core0_park_poll();    
+    tight_loop_contents();    
+  }   
+    
+  Serial.println("[DBG] setup done");
   Serial.flush();  
 }  
   
@@ -193,7 +193,10 @@ void loop() {
 // ============================================================================  
 // SETUP1 — Core 1  
 // ============================================================================  
-void setup1() {  
+void setup1() {    
+  
+  file_manager_core1_init();   // flash_safe_execute_core_init + разрешение записи  
+  
   while (!core0_ready) tight_loop_contents();  
   
   // Стартовый RX: VFO-hook → quad_vfo → set_clk_sys → разгон 337.5 МГц.  
