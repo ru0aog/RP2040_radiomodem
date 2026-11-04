@@ -312,8 +312,7 @@ int32_t msc_write_cb(
         Serial.printf(
         "[MSC WRITE] lba=%lu size=%lu\n",
         (unsigned long)lba,
-        (unsigned long)bufsize
-    );
+        (unsigned long)bufsize);
 
     if (buffer == nullptr ||
         bufsize == 0 ||
@@ -1459,142 +1458,158 @@ void force_reset_to_default_disk(void)
 // Process PC changes and deferred state saves
 // ---------------------------------------------------------------------------
 
-void check_and_handle_pc_changes(void)
-{
-    // Flash and USB MSC operations are allowed on Core 0 only.
-    if (get_core_num() != 0) {
-        return;
-    }
 
-    // ---------------------------------------------------------
-    // 1. Deferred state save
-    // ---------------------------------------------------------
-    if (state_save_pending) {
-
-        if (!flash_write_allowed()) {
-            return;
-        }
-
-        if (trx_state() != TRX_RX) {
-            return;
-        }
-
-        const int32_t old_slot = current_active_slot;
-        const uint32_t old_seq = current_max_seq;
-
-        save_state();
-
-        // Check that save_state() actually completed a new save.
-        if (current_active_slot < 0 ||
-            current_max_seq == old_seq) {
-            return;
-        }
-
-        state_save_pending = false;
-
-        Serial.printf(
-            "[FM] state saved: slot=%ld seq=%lu\n",
-            (long)current_active_slot,
-            (unsigned long)current_max_seq
-        );
-
-        String hdr =
-            "\r\n=== session start, seq=" +
-            String(current_max_seq) +
-            " ===\r\n";
-
-        log_append(
-            reinterpret_cast<const uint8_t*>(hdr.c_str()),
-            (uint32_t)hdr.length()
-        );
-
-        remount_usb_disk();
-
-        (void)old_slot;
-    }
-
-    // ---------------------------------------------------------
-    // 2. Detect changes made by the PC through USB MSC
-    // ---------------------------------------------------------
-    if (!pc_activity_detected) {
-        return;
-    }
-
-    // Wait until Windows finishes writing all filesystem data.
-    if ((uint32_t)(millis() - last_msc_write_time) < 1500u) {
-        return;
-    }
-
-    // Flash operations are permitted only when the system is safe.
-    if (!flash_write_allowed()) {
-        return;
-    }
-
-    if (trx_state() != TRX_RX) {
-        return;
-    }
-
-    // Snapshot the changed regions.
-    // MSC callbacks and this function are expected to run on Core 0.
-    const uint8_t regions = pc_written_regions;
-
-    if (regions == 0) {
-        pc_activity_detected = false;
-        pc_file_written = false;
-        return;
-    }
-
-    // ---------------------------------------------------------
-    // 3. Parse files changed by Windows
-    // ---------------------------------------------------------
-    if (regions & 0x02) {
-        read_and_parse_INFO_txt();
-    }
-
-    if (regions & 0x04) {
-        read_and_parse_CONFIG_txt();
-    }
-
-    if (regions & 0x08) {
-        read_and_parse_SET_txt();
-    }
-
-    // ---------------------------------------------------------
-    // 4. Save updated state to Flash
-    // ---------------------------------------------------------
-    const int32_t old_slot = current_active_slot;
-    const uint32_t old_seq = current_max_seq;
-
-    save_state();
-
-    // Do not clear the event if save_state() did not complete.
-    if (current_active_slot < 0 ||
-        current_max_seq == old_seq) {
-
-        Serial.println(
-            "[FM] state save failed or deferred; keeping PC event pending"
-        );
-
-        return;
-    }
-
-    Serial.printf(
-        "[FM] state saved: slot=%ld seq=%lu regions=0x%02X\n",
-        (long)current_active_slot,
-        (unsigned long)current_max_seq,
-        (unsigned)regions
-    );
-
-    // ---------------------------------------------------------
-    // 5. Clear processed event and remount disk
-    // ---------------------------------------------------------
-    pc_activity_detected = false;
-    pc_written_regions = 0;
-    pc_file_written = false;
-
-    remount_usb_disk();
-
-    (void)old_slot;
+void check_and_handle_pc_changes(void)  
+{  
+    // Flash and USB MSC operations are allowed on Core 0 only.  
+    if (get_core_num() != 0) {  
+        return;  
+    }  
+  
+    // ---------------------------------------------------------  
+    // 1. Deferred state save  
+    // ---------------------------------------------------------  
+    if (state_save_pending) {  
+  
+        if (!flash_write_allowed()) {  
+            static uint32_t t1 = 0;  
+            if (millis() - t1 > 2000) {  
+                t1 = millis();  
+                Serial.println("[FM] state save pending, flash not ready");  
+            }  
+            return;  
+        }  
+  
+        if (trx_state() != TRX_RX) {  
+            static uint32_t t2 = 0;  
+            if (millis() - t2 > 2000) {  
+                t2 = millis();  
+                Serial.println("[FM] state save pending, trx busy");  
+            }  
+            return;  
+        }  
+  
+        const uint32_t old_seq = current_max_seq;  
+  
+        save_state();  
+  
+        // Check that save_state() actually completed a new save.  
+        if (current_active_slot < 0 ||  
+            current_max_seq == old_seq) {  
+            return;  
+        }  
+  
+        state_save_pending = false;  
+  
+        Serial.printf(  
+            "[FM] state saved: slot=%ld seq=%lu\n",  
+            (long)current_active_slot,  
+            (unsigned long)current_max_seq  
+        );  
+  
+        String hdr =  
+            "\r\n=== session start, seq=" +  
+            String(current_max_seq) +  
+            " ===\r\n";  
+  
+        log_append(  
+            reinterpret_cast<const uint8_t*>(hdr.c_str()),  
+            (uint32_t)hdr.length()  
+        );  
+  
+        remount_usb_disk();  
+    }  
+  
+    // ---------------------------------------------------------  
+    // 2. Detect changes made by the PC through USB MSC  
+    // ---------------------------------------------------------  
+    if (!pc_activity_detected) {  
+        return;  
+    }  
+  
+    // Wait until Windows finishes writing all filesystem data.  
+    if ((uint32_t)(millis() - last_msc_write_time) < 1500u) {  
+        return;  
+    }  
+  
+    // Flash operations are permitted only when the system is safe.  
+    if (!flash_write_allowed()) {  
+        static uint32_t t3 = 0;  
+        if (millis() - t3 > 2000) {  
+            t3 = millis();  
+            Serial.println("[FM] PC write detected, flash not ready");  
+        }  
+        return;  
+    }  
+  
+    if (trx_state() != TRX_RX) {  
+        static uint32_t t4 = 0;  
+        if (millis() - t4 > 2000) {  
+            t4 = millis();  
+            Serial.println("[FM] PC write detected, trx busy");  
+        }  
+        return;  
+    }  
+  
+    // Snapshot the changed regions.  
+    const uint8_t regions = pc_written_regions;  
+  
+    if (regions == 0) {  
+        pc_activity_detected = false;  
+        pc_file_written = false;  
+        return;  
+    }  
+  
+    Serial.printf("[FM] PC write: regions=0x%02X\n", (unsigned)regions);  
+  
+    // ---------------------------------------------------------  
+    // 3. Parse files changed by Windows  
+    // ---------------------------------------------------------  
+    if (regions & 0x02) {  
+        read_and_parse_INFO_txt();  
+    }  
+  
+    if (regions & 0x04) {  
+        read_and_parse_CONFIG_txt();  
+    }  
+  
+    if (regions & 0x08) {  
+        read_and_parse_SET_txt();  
+    }  
+  
+    // ---------------------------------------------------------  
+    // 4. Save updated state to Flash  
+    // ---------------------------------------------------------  
+    const uint32_t old_seq = current_max_seq;  
+  
+    save_state();  
+  
+    // Do not clear the event if save_state() did not complete.  
+    if (current_active_slot < 0 ||  
+        current_max_seq == old_seq) {  
+  
+        Serial.println(  
+            "[FM] state save failed or deferred; keeping PC event pending"  
+        );  
+  
+        return;  
+    }  
+  
+    Serial.printf(  
+        "[FM] state saved: slot=%ld seq=%lu regions=0x%02X\n",  
+        (long)current_active_slot,  
+        (unsigned long)current_max_seq,  
+        (unsigned)regions  
+    );  
+  
+    // ---------------------------------------------------------  
+    // 5. Clear processed event and remount disk  
+    // ---------------------------------------------------------  
+    pc_activity_detected = false;  
+    pc_written_regions = 0;  
+    pc_file_written = false;  
+  
+    remount_usb_disk();  
 }
 
 // Вызывается из setup1() на Core 1 ДО начала работы DSP.  

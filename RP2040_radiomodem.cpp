@@ -193,26 +193,26 @@ void loop() {
 // ============================================================================  
 // SETUP1 — Core 1  
 // ============================================================================  
-void setup1() {    
+void setup1() {  
   
   file_manager_core1_init();   // flash_safe_execute_core_init + разрешение записи  
   
   while (!core0_ready) tight_loop_contents();  
   
-  // Стартовый RX: VFO-hook → quad_vfo → set_clk_sys → разгон 337.5 МГц.  
+  // Стартовый RX: VFO-hook → quad_vfo → set_clk_sys → разгон.  
   // Паркует Core 0 флаг-протоколом (Core 0 уже в while(!core1_pll_done)  
   // с core0_park_poll — handshake обслуживается).  
-  vfo_on_trx_switch(TRX_RX, 3602000);    
-    
-  core1_pll_done = true;             // Core 0 выходит из ожидания    
-    
-  delay(100);                        // старт SM    
-  vfo_quad_debug();                  // [LODBG] clkdiv/enabled/lo_hz    
-  cat_set_freq_hz(3602000);          // зеркало FA для ответов CAT (s_rx_hz)    
-  rx_dsp_start(3602000);             // NCO = f_rx - vfo_quad_lo_hz()
-  rx_dsp_set_demod(RXD_DEMOD_USB);   // или соответствующее имя API
+  vfo_on_trx_switch(TRX_RX, 3602000);  
+  
+  core1_pll_done = true;             // Core 0 выходит из ожидания  
+  
+  delay(100);                        // старт SM  
+  vfo_quad_debug();                  // [LODBG] clkdiv/enabled/lo_hz  
+  cat_set_freq_hz(3602000);          // зеркало FA для ответов CAT (s_rx_hz)  
+  rx_dsp_set_demod(RXD_DEMOD_USB);   // демод до старта DSP  
+  rx_dsp_start(3602000);             // NCO = f_rx - vfo_quad_lo_hz()  
   rx_capture_start();                // DMA запускаем ПОСЛЕ настройки NCO  
-}  
+}
   
 volatile uint32_t dbg_l1 = 0, dbg_poll_in = 0, dbg_poll_out = 0;  
   
