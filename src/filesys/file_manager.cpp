@@ -225,13 +225,14 @@ static uint32_t crc32_update(
 // TinyUSB MSC callbacks
 // ---------------------------------------------------------------------------
 
-void msc_flush_cb(void)
-{
-    last_msc_write_time = millis();
-
-    __dmb();
-
-    pc_activity_detected = true;
+void msc_flush_cb(void)  
+{  
+    // Flush = Windows завершил запись. Фиксируем событие, но НЕ трогаем  
+    // last_msc_write_time — иначе периодические SYNCHRONIZE CACHE от  
+    // Windows будут вечно отодвигать 1500-мс окно ожидания, и  
+    // check_and_handle_pc_changes() никогда не дойдёт до save_state().  
+    __dmb();  
+    pc_activity_detected = true;  
 }
 
 int32_t msc_read_cb(
@@ -1272,10 +1273,11 @@ void log_append(const uint8_t* data, uint32_t len)
         consumed += n;
     }
 
-    flash_flush_cache();
-
-    // USB MSC operations are kept on Core 0.
-    remount_usb_disk();
+    flash_flush_cache();  
+  
+    // Remount на каждую строку лога слишком дорог (50 мс + ре-энумерация  
+    // USB). Windows увидит новый размер LOG.TXT при следующем обращении  
+    // или после remount по PC-записи / явной команде.  
 }
 
 // ---------------------------------------------------------------------------
@@ -1612,11 +1614,10 @@ void check_and_handle_pc_changes(void)
     remount_usb_disk();  
 }
 
-// Вызывается из setup1() на Core 1 ДО начала работы DSP.  
-// Инициализирует парковку для flash_safe_execute и разрешает flash-записи.  
 void file_manager_core1_init(void) {  
     flash_safe_execute_core_init();  
     __dmb();  
     flash_safe_ready = true;  
     __dmb();  
+    Serial.println("[FM] core1 init: flash writes ENABLED");  
 }
