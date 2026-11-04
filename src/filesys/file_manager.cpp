@@ -328,6 +328,7 @@ int32_t msc_write_cb(
     return (int32_t)bufsize;
 }
 
+
 // ---------------------------------------------------------------------------
 // FAT12 helpers
 // ---------------------------------------------------------------------------
@@ -1399,29 +1400,14 @@ void check_and_handle_pc_changes(void)
     }
 
     if (state_save_pending &&  
-    flash_write_allowed() &&  
-    trx_state() == TRX_RX) {  
+        flash_write_allowed() &&  
+        trx_state() == TRX_RX) {  
   
         save_state();  
-    
-        if (current_active_slot >= 0 && current_max_seq != 0) {  
-            state_save_pending = false;  
-    
-            String hdr = "\r\n=== session ===\r\n";  
-            log_append(  
-                reinterpret_cast<const uint8_t*>(hdr.c_str()),  
-                (uint32_t)hdr.length()  
-            );  
-    
-            remount_usb_disk();  
-        }  
-
-    // если условия не выполнены — просто идём дальше к pc_activity_detected 
   
         // save_state() may return without writing if Flash safety  
         // is not enabled. Keep the pending flag in that case.  
-        if (current_active_slot < 0 ||  
-            current_max_seq == 0) {  
+        if (current_active_slot < 0 || current_max_seq == 0) {  
             return;  
         }  
   
@@ -1429,19 +1415,19 @@ void check_and_handle_pc_changes(void)
   
         Serial.printf("[FM] state saved: slot=%ld seq=%lu\n",  
                       (long)current_active_slot,  
-                      (unsigned long)current_max_seq);
-
-        String hdr =
-            "\r\n=== session start, seq=" +
-            String(current_max_seq) +
-            " ===\r\n";
-
-        log_append(
-            reinterpret_cast<const uint8_t*>(hdr.c_str()),
-            (uint32_t)hdr.length()
-        );
-
-        remount_usb_disk();
+                      (unsigned long)current_max_seq);  
+  
+        String hdr =  
+            "\r\n=== session start, seq=" +  
+            String(current_max_seq) +  
+            " ===\r\n";  
+  
+        log_append(  
+            reinterpret_cast<const uint8_t*>(hdr.c_str()),  
+            (uint32_t)hdr.length()  
+        );  
+  
+        remount_usb_disk();  
     }
 
     if (!pc_activity_detected) {
@@ -1494,5 +1480,7 @@ void check_and_handle_pc_changes(void)
 // Инициализирует парковку для flash_safe_execute и разрешает flash-записи.  
 void file_manager_core1_init(void) {  
     flash_safe_execute_core_init();  
-    flash_safe_ready = true;   // внутренний флаг модуля, снаружи не трогаем  
+    __dmb();  
+    flash_safe_ready = true;  
+    __dmb();  
 }
