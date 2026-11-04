@@ -228,6 +228,9 @@ static uint32_t crc32_update(
 void msc_flush_cb(void)
 {
     last_msc_write_time = millis();
+    pc_activity_detected = true;
+
+    __dmb();
 }
 
 int32_t msc_read_cb(
@@ -1345,15 +1348,17 @@ void init_usb_msc_interface(void)
 
     usb_msc.setReadWriteCallback(msc_read_cb, msc_write_cb, msc_flush_cb); 
 
-    usb_msc.setUnitReady(true);  
-    
-    usb_msc.begin();  
+    usb_msc.setUnitReady(true);
+
+    usb_msc.begin();
+
+    usb_started = true;
 
     Serial.printf(
         "[MSC] registered: %u sectors x %u bytes\n",
         (unsigned)SECTOR_COUNT,
         (unsigned)SECTOR_SIZE
-    );
+);
 }
 
 // ---------------------------------------------------------------------------
@@ -1393,16 +1398,25 @@ void check_and_handle_pc_changes(void)
         return;
     }
 
-    if (state_save_pending) {
-        if (!flash_write_allowed()) {
-            return;
-        }
-
-        if (trx_state() != TRX_RX) {
-            return;
-        }
-
+    if (state_save_pending &&  
+    flash_write_allowed() &&  
+    trx_state() == TRX_RX) {  
+  
         save_state();  
+    
+        if (current_active_slot >= 0 && current_max_seq != 0) {  
+            state_save_pending = false;  
+    
+            String hdr = "\r\n=== session ===\r\n";  
+            log_append(  
+                reinterpret_cast<const uint8_t*>(hdr.c_str()),  
+                (uint32_t)hdr.length()  
+            );  
+    
+            remount_usb_disk();  
+        }  
+
+    // если условия не выполнены — просто идём дальше к pc_activity_detected 
   
         // save_state() may return without writing if Flash safety  
         // is not enabled. Keep the pending flag in that case.  
