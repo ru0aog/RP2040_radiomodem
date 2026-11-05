@@ -92,10 +92,11 @@ void setup() {
   // set_clk_sys с флаг-парковкой; без poll() парк уйдёт в PARK TIMEOUT.  
   // В этой точке на Core 0 — пустой цикл без USB: живой TinyUSB-стек  
   // во время парковки кладёт handshake (был завис на "before park").  
-  while (!core1_pll_done) {  
+while (!core1_pll_done) {  
     core0_park_poll();  
     tight_loop_contents();  
-  }  
+}  
+Serial.println("[FM] core1 init: flash writes ENABLED");
   
   Serial.println("[DBG] setup done");  
   Serial.flush();  
@@ -194,8 +195,11 @@ void loop() {
 // SETUP1 — Core 1  
 // ============================================================================  
 void setup1() {  
+ 
   while (!core0_ready) tight_loop_contents();  
-  
+
+  // 
+
   // Стартовый RX: VFO-hook → quad_vfo → set_clk_sys → разгон 337.5 МГц.  
   // Паркует Core 0 флаг-протоколом (Core 0 уже в while(!core1_pll_done)  
   // с core0_park_poll — handshake обслуживается).  
@@ -215,7 +219,8 @@ volatile uint32_t dbg_l1 = 0, dbg_poll_in = 0, dbg_poll_out = 0;
   
 void loop1() {  
   ++dbg_l1;  
-  trx_poll_core1();  
+  core1_park_poll();          // ПЕРВОЙ строкой — обслуживание парковки  
+  trx_poll_core1(); 
   if (trx_state() == TRX_RX) {  
     ++dbg_poll_in;  
     rx_dsp_poll();  

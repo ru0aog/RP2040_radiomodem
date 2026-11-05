@@ -73,6 +73,10 @@ volatile uint32_t last_msc_write_time = 0;
 volatile bool pc_activity_detected = false;
 volatile uint8_t pc_written_regions = 0;
 
+extern volatile uint32_t core0_park_req;  
+extern volatile uint32_t core0_park_ack;  
+extern void core0_park_poll(void);
+
 // ---------------------------------------------------------------------------
 // Internal state
 // ---------------------------------------------------------------------------
@@ -125,78 +129,90 @@ static bool flash_write_allowed(void)
 // Multicore-safe Flash helpers
 // ---------------------------------------------------------------------------
 
-struct FlashEraseArgs {
-    uint32_t offset;
-    size_t size;
-};
-
-struct FlashProgramArgs {
-    uint32_t offset;
-    const uint8_t* data;
-    size_t size;
-};
-
-// These workers must execute from RAM while XIP Flash is unavailable.
-static void __not_in_flash_func(flash_erase_worker)(void* arg)
-{
-    const FlashEraseArgs* a =
-        static_cast<const FlashEraseArgs*>(arg);
-
-    flash_range_erase(a->offset, a->size);
-}
-
-static void __not_in_flash_func(flash_program_worker)(void* arg)
-{
-    const FlashProgramArgs* a =
-        static_cast<const FlashProgramArgs*>(arg);
-
-    flash_range_program(a->offset, a->data, a->size);
-}
-
-static bool safe_flash_erase(uint32_t offset, size_t size)
-{
-    if (!flash_write_allowed()) {
-        return false;
-    }
-
-    if (size == 0 ||
-        (offset % FLASH_SECTOR_SIZE) != 0 ||
-        (size % FLASH_SECTOR_SIZE) != 0) {
-        Serial.println("[FM] ERROR: invalid Flash erase alignment");
-        return false;
-    }
-
-    FlashEraseArgs a{offset, size};
-
-    const int rc =
-        flash_safe_execute(flash_erase_worker, &a, UINT32_MAX);
-
-    return rc == PICO_OK;
-}
-
-static bool safe_flash_program(
-    uint32_t offset,
-    const uint8_t* data,
-    size_t size)
-{
-    if (!flash_write_allowed()) {
-        return false;
-    }
-
-    if (data == nullptr ||
-        size == 0 ||
-        (offset % FLASH_PAGE_SIZE) != 0 ||
-        (size % FLASH_PAGE_SIZE) != 0) {
-        Serial.println("[FM] ERROR: invalid Flash program alignment");
-        return false;
-    }
-
-    FlashProgramArgs a{offset, data, size};
-
-    const int rc =
-        flash_safe_execute(flash_program_worker, &a, UINT32_MAX);
-
-    return rc == PICO_OK;
+// Парковка Core 1 флаг-протоколом (зеркало core0_park_*).  
+// Core 1 обслуживает запрос в core1_park_poll() — первой строкой loop1().  
+volatile bool core1_park_req   = false;  
+volatile bool core1_parked     = false;  
+  
+// Вызывается на Core 1 из loop1(). Тело в RAM: во время erase XIP отключён.  
+void __not_in_flash_func(core1_park_poll)(void) {  
+    if (!core1_park_req) return;  
+    core1_parked = true;  
+    __dmb();  
+    __sev();  
+    while (core1_park_req) { __wfe(); }  
+    core1_parked = false;  
+    __dmb();  
+    __sev();  
+}  
+  
+// Core 0: запросить парковку Core 1. false = таймаут.  
+static bool park_core1(void) {  
+    core1_parked = false;  
+    __dmb();  
+    core1_park_req = true;  
+    __dmb();  
+    __sev();  
+    const uint32_t t0 = millis();  
+    while (!core1_parked) {  
+        // Отвечаем на встречный запрос парковки, иначе deadlock.  
+        if (core0_park_req != 0 && core0_park_req != core0_park_ack) {  
+            core0_park_poll();  
+        }  
+        if ((millis() - t0) > 200) {  
+            core1_park_req = false;  
+            Serial.println("[FM] ERROR: core1 park timeout");  
+            return false;  
+        }  
+    }  
+    return true;  
+}  
+  
+static void unpark_core1(void) {  
+    core1_park_req = false;  
+    __dmb();  
+    __sev();  
+}  
+  
+static bool __not_in_flash_func(do_flash_erase)(uint32_t offset, size_t size) {  
+    if (!park_core1()) return false;  
+    const uint32_t ints = save_and_disable_interrupts();  
+    flash_range_erase(offset, size);  
+    restore_interrupts(ints);  
+    unpark_core1();  
+    return true;  
+}  
+  
+static bool __not_in_flash_func(do_flash_program)(uint32_t offset,  
+                                                  const uint8_t* data,  
+                                                  size_t size) {  
+    if (!park_core1()) return false;  
+    const uint32_t ints = save_and_disable_interrupts();  
+    flash_range_program(offset, data, size);  
+    restore_interrupts(ints);  
+    unpark_core1();  
+    return true;  
+}  
+  
+static bool safe_flash_erase(uint32_t offset, size_t size) {  
+    if (!flash_write_allowed()) return false;  
+    if (size == 0 || (offset % FLASH_SECTOR_SIZE) != 0 ||  
+        (size % FLASH_SECTOR_SIZE) != 0) {  
+        Serial.println("[FM] ERROR: invalid Flash erase alignment");  
+        return false;  
+    }  
+    return do_flash_erase(offset, size);  
+}  
+  
+static bool safe_flash_program(uint32_t offset, const uint8_t* data, size_t size) {  
+    if (!flash_write_allowed()) return false;  
+    if (data == nullptr || size == 0 ||  
+        (offset % FLASH_PAGE_SIZE) != 0 ||  
+        (size % FLASH_PAGE_SIZE) != 0) {  
+        Serial.println("[FM] ERROR: invalid Flash program alignment");  
+        return false;  
+    }  
+    return do_flash_program(offset, data, size);  
 }
 
 // ---------------------------------------------------------------------------
@@ -225,9 +241,10 @@ static uint32_t crc32_update(
 // TinyUSB MSC callbacks
 // ---------------------------------------------------------------------------
 
-void msc_flush_cb(void)
-{
-    last_msc_write_time = millis();
+void msc_flush_cb(void) {  
+    pc_activity_detected = true;  
+    // last_msc_write_time НЕ трогаем — иначе периодические flush  
+    // от Windows вечно отодвигают 1500-мс окно сохранения.  
 }
 
 int32_t msc_read_cb(
@@ -1465,4 +1482,11 @@ void check_and_handle_pc_changes(void)
     remount_usb_disk();
 
     pc_file_written = false;
+}
+
+// src/filesys/file_manager.cpp — тело без Serial.println:  
+void file_manager_core1_init(void) {  
+    __dmb();  
+    flash_safe_ready = true;  
+    __dmb();  
 }

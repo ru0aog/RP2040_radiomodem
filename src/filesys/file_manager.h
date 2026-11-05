@@ -195,4 +195,9 @@ void log_file_write_line(String message);
 
 void file_manager_set_flash_safe_ready(bool ready);
 
+void file_manager_core1_init(void);
+
+extern volatile bool core1_park_req;  
+void core1_park_poll(void);
+
 #endif // FILE_MANAGER_H
