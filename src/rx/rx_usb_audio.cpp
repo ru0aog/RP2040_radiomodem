@@ -394,10 +394,11 @@ void usb_audio_init(void) {
     memset(pcm_buffer, 0, sizeof(pcm_buffer));
     push_demod_to_core1();
 
+    /*
     // Инициализация TinyUSB.
     if (!TinyUSBDevice.isInitialized()) {
-        TinyUSBDevice.begin(0);
-    }
+        TinyUSBDevice.begin(0);}
+    */
 
     // Конфигурация USB Audio Class 2.0.
     auto cfg = usb_out.defaultConfig(TX_MODE);
