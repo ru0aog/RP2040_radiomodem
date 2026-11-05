@@ -14,6 +14,7 @@
 // ============================================================================  
   
 #include <Arduino.h>  
+#include <pico/flash.h>
 #include "src/mem/mem_arena.h"  
 #include "src/rx/rx_capture.h"  
 #include "src/rx/rx_dsp.h"  
@@ -92,11 +93,12 @@ void setup() {
   // set_clk_sys с флаг-парковкой; без poll() парк уйдёт в PARK TIMEOUT.  
   // В этой точке на Core 0 — пустой цикл без USB: живой TinyUSB-стек  
   // во время парковки кладёт handshake (был завис на "before park").  
-while (!core1_pll_done) {  
-    core0_park_poll();  
-    tight_loop_contents();  
-}  
-Serial.println("[FM] core1 init: flash writes ENABLED");
+  while (!core1_pll_done) {  
+      core0_park_poll();  
+      tight_loop_contents();  
+  }  
+  file_manager_set_flash_safe_ready(true);              // ← добавить  
+  Serial.println("[FM] core1 init: flash writes ENABLED");
   
   Serial.println("[DBG] setup done");  
   Serial.flush();  

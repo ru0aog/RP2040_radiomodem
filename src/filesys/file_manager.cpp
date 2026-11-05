@@ -25,6 +25,7 @@
 
 #include <hardware/flash.h>
 #include <hardware/sync.h>
+#include <hardware/clocks.h>
 
 #include <pico/flash.h>
 #include <pico/error.h>
@@ -34,6 +35,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+
 
 // ---------------------------------------------------------------------------
 // USB MSC
@@ -76,6 +78,24 @@ volatile uint8_t pc_written_regions = 0;
 extern volatile uint32_t core0_park_req;  
 extern volatile uint32_t core0_park_ack;  
 extern void core0_park_poll(void);
+
+static bool __not_in_flash_func(fm_clk_to_xosc)(void);  
+static bool __not_in_flash_func(fm_clk_to_pll)(void);
+
+// Парковка Core 1 — зеркало core0_park_* из trx_control.cpp  
+volatile bool core1_park_req = false;  
+volatile bool core1_parked   = false;  
+  
+void __not_in_flash_func(core1_park_poll)(void) {  
+    if (!core1_park_req) return;  
+    core1_parked = true;  
+    __dmb();  
+    __sev();  
+    while (core1_park_req) { __wfe(); }   // RAM-цикл, XIP не трогаем  
+    core1_parked = false;  
+    __dmb();  
+    __sev();  
+}
 
 // ---------------------------------------------------------------------------
 // Internal state
@@ -129,33 +149,19 @@ static bool flash_write_allowed(void)
 // Multicore-safe Flash helpers
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------  
 // Парковка Core 1 флаг-протоколом (зеркало core0_park_*).  
-// Core 1 обслуживает запрос в core1_park_poll() — первой строкой loop1().  
-volatile bool core1_park_req   = false;  
-volatile bool core1_parked     = false;  
+// Core 1 обслуживает core1_park_poll() первой строкой loop1().  
+// ---------------------------------------------------------------------------  
   
-// Вызывается на Core 1 из loop1(). Тело в RAM: во время erase XIP отключён.  
-void __not_in_flash_func(core1_park_poll)(void) {  
-    if (!core1_park_req) return;  
-    core1_parked = true;  
-    __dmb();  
-    __sev();  
-    while (core1_park_req) { __wfe(); }  
-    core1_parked = false;  
-    __dmb();  
-    __sev();  
-}  
-  
-// Core 0: запросить парковку Core 1. false = таймаут.  
 static bool park_core1(void) {  
-    core1_parked = false;  
-    __dmb();  
     core1_park_req = true;  
     __dmb();  
     __sev();  
     const uint32_t t0 = millis();  
     while (!core1_parked) {  
-        // Отвечаем на встречный запрос парковки, иначе deadlock.  
+        // Если Core 1 держит встречный запрос к нам — обслуживаем,  
+        // иначе deadlock: он ждёт наш ack, мы ждём его парковку.  
         if (core0_park_req != 0 && core0_park_req != core0_park_ack) {  
             core0_park_poll();  
         }  
@@ -174,34 +180,72 @@ static void unpark_core1(void) {
     __sev();  
 }  
   
-static bool __not_in_flash_func(do_flash_erase)(uint32_t offset, size_t size) {  
-    if (!park_core1()) return false;  
-    const uint32_t ints = save_and_disable_interrupts();  
+static void __not_in_flash_func(do_flash_erase)(uint32_t offset, size_t size) {  
+    if (!park_core1()) return;  
+    uint32_t ints = save_and_disable_interrupts();  
+    fm_clk_to_xosc();                    // clk_sys: 373 МГц -> 12 МГц  
     flash_range_erase(offset, size);  
+    fm_clk_to_pll();                     // обратно на PLL_SYS (VFO не тронут)  
     restore_interrupts(ints);  
+    flash_flush_cache();  
     unpark_core1();  
-    return true;  
+}  
+
+// Перевод clk_sys на XOSC и обратно на PLL_SYS — только mux, PLL не трогаем.  
+// Вызывать ТОЛЬКО с отключёнными IRQ и припаркованным Core 1.  
+static bool __not_in_flash_func(fm_clk_to_xosc)(void) {  
+    clock_hw_t *c = &clocks_hw->clk[clk_sys];  
+    hw_clear_bits(&c->ctrl, CLOCKS_CLK_SYS_CTRL_SRC_BITS);  
+    uint32_t t = 200000u;  
+    while (!(c->selected & 1u) && --t) {}  
+    if (!t) return false;  
+    hw_write_masked(&c->ctrl,  
+        CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_XOSC_CLKSRC << CLOCKS_CLK_SYS_CTRL_AUXSRC_LSB,  
+        CLOCKS_CLK_SYS_CTRL_AUXSRC_BITS);  
+    c->div = 1u << CLOCKS_CLK_SYS_DIV_INT_LSB;  
+    hw_set_bits(&c->ctrl, CLOCKS_CLK_SYS_CTRL_SRC_BITS);  
+    t = 200000u;  
+    while (!(c->selected & 2u) && --t) {}  
+    return t != 0;  
 }  
   
-static bool __not_in_flash_func(do_flash_program)(uint32_t offset,  
-                                                  const uint8_t* data,  
-                                                  size_t size) {  
-    if (!park_core1()) return false;  
-    const uint32_t ints = save_and_disable_interrupts();  
+static bool __not_in_flash_func(fm_clk_to_pll)(void) {  
+    clock_hw_t *c = &clocks_hw->clk[clk_sys];  
+    hw_clear_bits(&c->ctrl, CLOCKS_CLK_SYS_CTRL_SRC_BITS);  
+    uint32_t t = 200000u;  
+    while (!(c->selected & 1u) && --t) {}  
+    if (!t) return false;  
+    hw_write_masked(&c->ctrl,  
+        CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS << CLOCKS_CLK_SYS_CTRL_AUXSRC_LSB,  
+        CLOCKS_CLK_SYS_CTRL_AUXSRC_BITS);  
+    hw_set_bits(&c->ctrl, CLOCKS_CLK_SYS_CTRL_SRC_BITS);  
+    t = 200000u;  
+    while (!(c->selected & 2u) && --t) {}  
+    return t != 0;  
+}
+  
+static void __not_in_flash_func(do_flash_program)(  
+        uint32_t offset, const uint8_t* data, size_t size) {  
+    if (!park_core1()) return;  
+    uint32_t ints = save_and_disable_interrupts();  
+    fm_clk_to_xosc();  
     flash_range_program(offset, data, size);  
+    fm_clk_to_pll();  
     restore_interrupts(ints);  
+    flash_flush_cache();  
     unpark_core1();  
-    return true;  
-}  
+}
   
 static bool safe_flash_erase(uint32_t offset, size_t size) {  
     if (!flash_write_allowed()) return false;  
-    if (size == 0 || (offset % FLASH_SECTOR_SIZE) != 0 ||  
+    if (size == 0 ||  
+        (offset % FLASH_SECTOR_SIZE) != 0 ||  
         (size % FLASH_SECTOR_SIZE) != 0) {  
         Serial.println("[FM] ERROR: invalid Flash erase alignment");  
         return false;  
     }  
-    return do_flash_erase(offset, size);  
+    do_flash_erase(offset, size);  
+    return true;  
 }  
   
 static bool safe_flash_program(uint32_t offset, const uint8_t* data, size_t size) {  
@@ -212,7 +256,8 @@ static bool safe_flash_program(uint32_t offset, const uint8_t* data, size_t size
         Serial.println("[FM] ERROR: invalid Flash program alignment");  
         return false;  
     }  
-    return do_flash_program(offset, data, size);  
+    do_flash_program(offset, data, size);  
+    return true;  
 }
 
 // ---------------------------------------------------------------------------
@@ -1410,15 +1455,15 @@ void check_and_handle_pc_changes(void)
         return;
     }
 
-    if (state_save_pending) {
-        if (!flash_write_allowed()) {
-            return;
-        }
-
-        if (trx_state() != TRX_RX) {
-            return;
-        }
-
+    if (state_save_pending) {  
+        if (!flash_write_allowed()) {  
+            return;  
+        }  
+  
+        if (trx_state() != TRX_RX) {  
+            return;  
+        }  
+  
         save_state();
 
         // save_state() may return without writing if Flash safety
@@ -1428,11 +1473,11 @@ void check_and_handle_pc_changes(void)
             return;
         }
 
-        state_save_pending = false;
-
-        String hdr =
-            "\r\n=== session start, seq=" +
-            String(current_max_seq) +
+        state_save_pending = false;  
+  
+        String hdr =  
+            "\r\n=== session start, seq=" +  
+            String(current_max_seq) +  
             " ===\r\n";
 
         log_append(
@@ -1443,12 +1488,18 @@ void check_and_handle_pc_changes(void)
         remount_usb_disk();
     }
 
-    if (!pc_activity_detected) {
-        return;
-    }
-
-    if ((uint32_t)(millis() - last_msc_write_time) < 1500u) {
-        return;
+    if (!pc_activity_detected) {  
+        return;  
+    }  
+  
+    if (pc_written_regions == 0) {  
+        // Flush без записей — нечего сохранять.  
+        pc_activity_detected = false;  
+        return;  
+    }  
+  
+    if ((uint32_t)(millis() - last_msc_write_time) < 1500u) {  
+        return;  
     }
 
     if (!flash_write_allowed()) {
@@ -1459,13 +1510,13 @@ void check_and_handle_pc_changes(void)
         return;
     }
 
-    pc_activity_detected = false;
-
-    const uint8_t regions = pc_written_regions;
-
+    const uint8_t regions = pc_written_regions;  
+  
+    Serial.printf("[FM] PC write: regions=0x%02X\n", (unsigned)regions);  
+    save_state();  
+  
+    pc_activity_detected = false;  
     pc_written_regions = 0;
-
-    save_state();
 
     if (regions & 0x02) {
         read_and_parse_INFO_txt();
@@ -1482,11 +1533,4 @@ void check_and_handle_pc_changes(void)
     remount_usb_disk();
 
     pc_file_written = false;
-}
-
-// src/filesys/file_manager.cpp — тело без Serial.println:  
-void file_manager_core1_init(void) {  
-    __dmb();  
-    flash_safe_ready = true;  
-    __dmb();  
 }

@@ -273,11 +273,13 @@ void rx_capture_start(void) {
     dma_channel_start(rx_dma_a);  
     adc_run(true);  
   
+    /*
     Serial.printf("[CAP] chA=%d chB=%d block=%u pairs transfers=%u\n",  
                   rx_dma_a, rx_dma_b,  
                   (unsigned)RX_BLOCK_SAMPLES, (unsigned)RX_BLOCK_TRANSFERS);  
     Serial.printf("[CAP] ADC target=%lu/s clkdiv=%ld\n",  
               (unsigned long)RX_ADC_SAMPLE_RATE_HZ, (long)(adc_div + 0.5f));
+    */
 }  
   
 // ---------------------------------------------------------------------------  
