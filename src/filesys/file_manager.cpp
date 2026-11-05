@@ -1408,27 +1408,26 @@ void init_usb_msc_interface(void)
 
     Serial.println("[MSC] registering");
 
-Serial.println("[MSC] registering");
+    Serial.println("[MSC] registering");
 
-usb_msc.setID("RP2040", "RADIOMODEM", "1.0");
+    usb_msc.setID("RP2040", "RADIOMODEM", "1.0");
 
-usb_msc.setReadWriteCallback(
-    msc_read_cb,
-    msc_write_cb,
-    msc_flush_cb
-);
+    usb_msc.setReadWriteCallback(
+        msc_read_cb,
+        msc_write_cb,
+        msc_flush_cb
+    );
 
-usb_msc.setCapacity(SECTOR_COUNT, SECTOR_SIZE);
-usb_msc.setUnitReady(true);
-usb_msc.begin();
+    usb_msc.setCapacity(SECTOR_COUNT, SECTOR_SIZE);
+    usb_msc.setUnitReady(true);
+    usb_msc.begin();
 
-usb_started = true;
+    usb_started = true;
 
-Serial.printf(
-    "[MSC] registered: %u sectors x %u bytes\n",
-    (unsigned)SECTOR_COUNT,
-    (unsigned)SECTOR_SIZE
-);
+    Serial.printf(
+        "[MSC] registered: %u sectors x %u bytes\n",
+        (unsigned)SECTOR_COUNT,
+        (unsigned)SECTOR_SIZE);
 }
 
 // ---------------------------------------------------------------------------

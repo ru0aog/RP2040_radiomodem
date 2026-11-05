@@ -385,51 +385,31 @@ static bool next_frame(int16_t* l, int16_t* r) {
 USBAudioDeviceTinyUSB usb_out;
 
 static int16_t pcm_buffer[192 * 2];  
+
+void usb_audio_init(void) {  
   
-void usb_audio_init(void) {
-
-    agc_avg_q16 = (int64_t)4096 << 16;
-    lim_peak_q16 = (int64_t)2048 << 16;
-
-    memset(pcm_buffer, 0, sizeof(pcm_buffer));
-    push_demod_to_core1();
-
-    // Инициализация TinyUSB.
-    if (!TinyUSBDevice.isInitialized()) {
-        TinyUSBDevice.begin(0);
-    }
-
-    // Конфигурация USB Audio Class 2.0.
-    auto cfg = usb_out.defaultConfig(TX_MODE);
-
-    cfg.sample_rate     = 44100;
-    cfg.channels        = 2;
-    cfg.bits_per_sample = 16;
-
-    // Регистрируем аудиоинтерфейс.
-    if (!usb_out.begin(cfg)) {
-        //Serial.println("[UAC] ERROR: usb_out.begin() failed");
-        return;
-    }
-
-    //return;                          // (4) виснет? -> usb_out.begin  <- главный подозреваемый
-
-    //Serial.println("[UAC] Audio interface initialized");
-
-    // Важно: если USB уже перечислен хостом,
-    // переподключаем устройство, чтобы Windows
-    // заново прочитала конфигурацию и аудиодескрипторы.
-    if (TinyUSBDevice.mounted()) {
-        //Serial.println("[UAC] Re-enumerating USB...");
-
-        TinyUSBDevice.detach();
-        delay(10);
-        TinyUSBDevice.attach();
-    }
-
-    //Serial.println("[UAC] init 44100/16/stereo");
-
-//Serial.println("[UAC] Re-enumeration skipped");
+    agc_avg_q16  = (int64_t)4096 << 16;  
+    lim_peak_q16 = (int64_t)2048 << 16;  
+  
+    memset(pcm_buffer, 0, sizeof(pcm_buffer));  
+    push_demod_to_core1();  
+  
+    // Конфигурация USB Audio Class 2.0.  
+    auto cfg = usb_out.defaultConfig(TX_MODE);  
+  
+    cfg.sample_rate     = 44100;  
+    cfg.channels        = 2;  
+    cfg.bits_per_sample = 16;  
+  
+    // Регистрируем аудиоинтерфейс (addInterface, стек ещё не стартовал).  
+    if (!usb_out.begin(cfg)) {  
+        return;  
+    }  
+  
+    // Стек TinyUSB стартует позже — неявно из Serial.begin() в setup(),  
+    // когда все интерфейсы (MSC, UAC) уже зарегистрированы.  
+    // Блок detach/attach при mounted() здесь бессмысленен: на этом этапе  
+    // устройство ещё не может быть смонтировано хостом.  
 }
 
 // Вызов из loop() на Core 0. Единственный потребитель аудио-очереди.  
