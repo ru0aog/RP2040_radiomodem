@@ -225,14 +225,9 @@ static uint32_t crc32_update(
 // TinyUSB MSC callbacks
 // ---------------------------------------------------------------------------
 
-void msc_flush_cb(void)  
-{  
-    // Flush = Windows завершил запись. Фиксируем событие, но НЕ трогаем  
-    // last_msc_write_time — иначе периодические SYNCHRONIZE CACHE от  
-    // Windows будут вечно отодвигать 1500-мс окно ожидания, и  
-    // check_and_handle_pc_changes() никогда не дойдёт до save_state().  
-    __dmb();  
-    pc_activity_detected = true;  
+void msc_flush_cb(void)
+{
+    last_msc_write_time = millis();
 }
 
 int32_t msc_read_cb(
@@ -242,61 +237,32 @@ int32_t msc_read_cb(
 {
     if (buffer == nullptr ||
         bufsize == 0 ||
-        (bufsize % SECTOR_SIZE) != 0) {
+        bufsize > SECTOR_SIZE ||
+        lba >= SECTOR_COUNT) {
         return -1;
     }
-
-    const uint32_t blocks = bufsize / SECTOR_SIZE;
-
-    if (lba >= SECTOR_COUNT ||
-        blocks > (SECTOR_COUNT - lba)) {
-        return -1;
-    }
-
-    const uint32_t off = lba * SECTOR_SIZE;
 
     if (lba < RAM_SECTORS) {
-        const uint32_t ram_blocks =
-            (RAM_SECTORS - lba);
+        const uint32_t off = lba * SECTOR_SIZE;
 
-        const uint32_t ram_bytes =
-            (blocks < ram_blocks ? blocks : ram_blocks)
-            * SECTOR_SIZE;
-
-        memcpy(buffer, &ram_disk_buffer[off], ram_bytes);
-
-        if (ram_bytes < bufsize) {
-            const uint32_t flash_off =
-                (RAM_SECTORS - lba) * SECTOR_SIZE;
-
-            const uint8_t* flash_data =
-                reinterpret_cast<const uint8_t*>(
-                    XIP_BASE + LOG_FLASH_OFFSET
-                );
-
-            memcpy(
-                static_cast<uint8_t*>(buffer) + ram_bytes,
-                flash_data,
-                bufsize - ram_bytes
-            );
-
-            (void)flash_off;
+        if (off + bufsize > DISK_SIZE_BYTES) {
+            return -1;
         }
+
+        memcpy(buffer, &ram_disk_buffer[off], bufsize);
     }
     else {
-        const uint32_t flash_off =
+        const uint32_t off =
             (lba - RAM_SECTORS) * SECTOR_SIZE;
+
+        if (off + bufsize > LOG_MAX_BYTES) {
+            return -1;
+        }
 
         const uint8_t* flash_data =
             reinterpret_cast<const uint8_t*>(
-                XIP_BASE + LOG_FLASH_OFFSET + flash_off
+                XIP_BASE + LOG_FLASH_OFFSET + off
             );
-
-        const uint32_t log_off = flash_off;
-
-        if (log_off + bufsize > LOG_MAX_BYTES) {
-            return -1;
-        }
 
         memcpy(buffer, flash_data, bufsize);
     }
@@ -309,55 +275,31 @@ int32_t msc_write_cb(
     uint8_t* buffer,
     uint32_t bufsize)
 {
-
-        Serial.printf(
-        "[MSC WRITE] lba=%lu size=%lu\n",
-        (unsigned long)lba,
-        (unsigned long)bufsize);
-
     if (buffer == nullptr ||
         bufsize == 0 ||
-        (bufsize % SECTOR_SIZE) != 0) {
+        bufsize > SECTOR_SIZE ||
+        lba >= SECTOR_COUNT) {
         return -1;
     }
 
-    const uint32_t blocks = bufsize / SECTOR_SIZE;
-
-    if (lba >= SECTOR_COUNT ||
-        blocks > (SECTOR_COUNT - lba)) {
-        return -1;
-    }
-
-    // USB LOG region is read-only.
-    // Do not report successful writes that were discarded.
-    if (lba >= RAM_SECTORS ||
-        blocks > (RAM_SECTORS - lba)) {
-        return -1;
+    // LOG.TXT is read-only through USB MSC.
+    if (lba >= RAM_SECTORS) {
+        return (int32_t)bufsize;
     }
 
     const uint32_t off = lba * SECTOR_SIZE;
 
-    if (off > DISK_SIZE_BYTES ||
-        bufsize > DISK_SIZE_BYTES - off) {
+    if (off + bufsize > DISK_SIZE_BYTES) {
         return -1;
     }
 
-    // Copy the complete multi-sector transfer.
-    memcpy(
-        &ram_disk_buffer[off],
-        buffer,
-        bufsize
-    );
+    memcpy(&ram_disk_buffer[off], buffer, bufsize);
 
-    // Register USB write activity.
     last_msc_write_time = millis();
 
     pc_activity_detected = true;
-    pc_file_written = true;
 
-    const uint32_t end_lba = lba + blocks;
-
-    // Determine all modified regions.
+    // Region flags:
     // 0x01 — boot sector / FAT / root directory
     // 0x02 — INFO.TXT
     // 0x04 — CONFIG.TXT
@@ -366,32 +308,22 @@ int32_t msc_write_cb(
     if (lba < INFO_LBA) {
         pc_written_regions |= 0x01;
     }
-
-    if (end_lba > INFO_LBA && lba < CONFIG_LBA) {
+    else if (lba < CONFIG_LBA) {
         pc_written_regions |= 0x02;
     }
-
-    if (end_lba > CONFIG_LBA && lba < SET_LBA) {
+    else if (lba < SET_LBA) {
         pc_written_regions |= 0x04;
     }
-
-    if (end_lba > SET_LBA) {
+    else {
         pc_written_regions |= 0x08;
     }
 
-    __dmb();
-
-Serial.printf(
-    "[MSC WRITE OK] lba=%lu end=%lu regions=0x%02X activity=%u\n",
-    (unsigned long)lba,
-    (unsigned long)end_lba,
-    (unsigned)pc_written_regions,
-    (unsigned)pc_activity_detected
-);
+    if (lba >= INFO_LBA) {
+        pc_file_written = true;
+    }
 
     return (int32_t)bufsize;
 }
-
 
 // ---------------------------------------------------------------------------
 // FAT12 helpers
@@ -1273,11 +1205,10 @@ void log_append(const uint8_t* data, uint32_t len)
         consumed += n;
     }
 
-    flash_flush_cache();  
-  
-    // Remount на каждую строку лога слишком дорог (50 мс + ре-энумерация  
-    // USB). Windows увидит новый размер LOG.TXT при следующем обращении  
-    // или после remount по PC-записи / явной команде.  
+    flash_flush_cache();
+
+    // USB MSC operations are kept on Core 0.
+    remount_usb_disk();
 }
 
 // ---------------------------------------------------------------------------
@@ -1408,26 +1339,21 @@ void init_usb_msc_interface(void)
 
     Serial.println("[MSC] registering");
 
-    Serial.println("[MSC] registering");
-
-    usb_msc.setID("RP2040", "RADIOMODEM", "1.0");
-
-    usb_msc.setReadWriteCallback(
-        msc_read_cb,
-        msc_write_cb,
-        msc_flush_cb
-    );
+    usb_msc.setID("RP2040", "RADIOMODEM", "1.0"); 
 
     usb_msc.setCapacity(SECTOR_COUNT, SECTOR_SIZE);
-    usb_msc.setUnitReady(true);
-    usb_msc.begin();
 
-    usb_started = true;
+    usb_msc.setReadWriteCallback(msc_read_cb, msc_write_cb, msc_flush_cb); 
+
+    usb_msc.setUnitReady(true);  
+    
+    usb_msc.begin();  
 
     Serial.printf(
         "[MSC] registered: %u sectors x %u bytes\n",
         (unsigned)SECTOR_COUNT,
-        (unsigned)SECTOR_SIZE);
+        (unsigned)SECTOR_SIZE
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1459,164 +1385,84 @@ void force_reset_to_default_disk(void)
 // Process PC changes and deferred state saves
 // ---------------------------------------------------------------------------
 
+void check_and_handle_pc_changes(void)
+{
+    // This function performs Flash operations and MSC operations.
+    // It must be called from Core 0 only.
+    if (get_core_num() != 0) {
+        return;
+    }
 
-void check_and_handle_pc_changes(void)  
-{  
-    // Flash and USB MSC operations are allowed on Core 0 only.  
-    if (get_core_num() != 0) {  
-        return;  
-    }  
-  
-    // ---------------------------------------------------------  
-    // 1. Deferred state save  
-    // ---------------------------------------------------------  
-    if (state_save_pending) {  
-  
-        if (!flash_write_allowed()) {  
-            static uint32_t t1 = 0;  
-            if (millis() - t1 > 2000) {  
-                t1 = millis();  
-                Serial.println("[FM] state save pending, flash not ready");  
-            }  
-            return;  
-        }  
-  
-        if (trx_state() != TRX_RX) {  
-            static uint32_t t2 = 0;  
-            if (millis() - t2 > 2000) {  
-                t2 = millis();  
-                Serial.println("[FM] state save pending, trx busy");  
-            }  
-            return;  
-        }  
-  
-        const uint32_t old_seq = current_max_seq;  
-  
-        save_state();  
-  
-        // Check that save_state() actually completed a new save.  
-        if (current_active_slot < 0 ||  
-            current_max_seq == old_seq) {  
-            return;  
-        }  
-  
-        state_save_pending = false;  
-  
-        Serial.printf(  
-            "[FM] state saved: slot=%ld seq=%lu\n",  
-            (long)current_active_slot,  
-            (unsigned long)current_max_seq  
-        );  
-  
-        String hdr =  
-            "\r\n=== session start, seq=" +  
-            String(current_max_seq) +  
-            " ===\r\n";  
-  
-        log_append(  
-            reinterpret_cast<const uint8_t*>(hdr.c_str()),  
-            (uint32_t)hdr.length()  
-        );  
-  
-        remount_usb_disk();  
-    }  
-  
-    // ---------------------------------------------------------  
-    // 2. Detect changes made by the PC through USB MSC  
-    // ---------------------------------------------------------  
-    if (!pc_activity_detected) {  
-        return;  
-    }  
-  
-    // Wait until Windows finishes writing all filesystem data.  
-    if ((uint32_t)(millis() - last_msc_write_time) < 1500u) {  
-        return;  
-    }  
-  
-    // Flash operations are permitted only when the system is safe.  
-    if (!flash_write_allowed()) {  
-        static uint32_t t3 = 0;  
-        if (millis() - t3 > 2000) {  
-            t3 = millis();  
-            Serial.println("[FM] PC write detected, flash not ready");  
-        }  
-        return;  
-    }  
-  
-    if (trx_state() != TRX_RX) {  
-        static uint32_t t4 = 0;  
-        if (millis() - t4 > 2000) {  
-            t4 = millis();  
-            Serial.println("[FM] PC write detected, trx busy");  
-        }  
-        return;  
-    }  
-  
-    // Snapshot the changed regions.  
-    const uint8_t regions = pc_written_regions;  
-  
-    if (regions == 0) {  
-        pc_activity_detected = false;  
-        pc_file_written = false;  
-        return;  
-    }  
-  
-    Serial.printf("[FM] PC write: regions=0x%02X\n", (unsigned)regions);  
-  
-    // ---------------------------------------------------------  
-    // 3. Parse files changed by Windows  
-    // ---------------------------------------------------------  
-    if (regions & 0x02) {  
-        read_and_parse_INFO_txt();  
-    }  
-  
-    if (regions & 0x04) {  
-        read_and_parse_CONFIG_txt();  
-    }  
-  
-    if (regions & 0x08) {  
-        read_and_parse_SET_txt();  
-    }  
-  
-    // ---------------------------------------------------------  
-    // 4. Save updated state to Flash  
-    // ---------------------------------------------------------  
-    const uint32_t old_seq = current_max_seq;  
-  
-    save_state();  
-  
-    // Do not clear the event if save_state() did not complete.  
-    if (current_active_slot < 0 ||  
-        current_max_seq == old_seq) {  
-  
-        Serial.println(  
-            "[FM] state save failed or deferred; keeping PC event pending"  
-        );  
-  
-        return;  
-    }  
-  
-    Serial.printf(  
-        "[FM] state saved: slot=%ld seq=%lu regions=0x%02X\n",  
-        (long)current_active_slot,  
-        (unsigned long)current_max_seq,  
-        (unsigned)regions  
-    );  
-  
-    // ---------------------------------------------------------  
-    // 5. Clear processed event and remount disk  
-    // ---------------------------------------------------------  
-    pc_activity_detected = false;  
-    pc_written_regions = 0;  
-    pc_file_written = false;  
-  
-    remount_usb_disk();  
-}
+    if (state_save_pending) {
+        if (!flash_write_allowed()) {
+            return;
+        }
 
-void file_manager_core1_init(void) {  
-    flash_safe_execute_core_init();  
-    __dmb();  
-    flash_safe_ready = true;  
-    __dmb();  
-    Serial.println("[FM] core1 init: flash writes ENABLED");  
+        if (trx_state() != TRX_RX) {
+            return;
+        }
+
+        save_state();
+
+        // save_state() may return without writing if Flash safety
+        // is not enabled. Keep the pending flag in that case.
+        if (current_active_slot < 0 ||
+            current_max_seq == 0) {
+            return;
+        }
+
+        state_save_pending = false;
+
+        String hdr =
+            "\r\n=== session start, seq=" +
+            String(current_max_seq) +
+            " ===\r\n";
+
+        log_append(
+            reinterpret_cast<const uint8_t*>(hdr.c_str()),
+            (uint32_t)hdr.length()
+        );
+
+        remount_usb_disk();
+    }
+
+    if (!pc_activity_detected) {
+        return;
+    }
+
+    if ((uint32_t)(millis() - last_msc_write_time) < 1500u) {
+        return;
+    }
+
+    if (!flash_write_allowed()) {
+        return;
+    }
+
+    if (trx_state() != TRX_RX) {
+        return;
+    }
+
+    pc_activity_detected = false;
+
+    const uint8_t regions = pc_written_regions;
+
+    pc_written_regions = 0;
+
+    save_state();
+
+    if (regions & 0x02) {
+        read_and_parse_INFO_txt();
+    }
+
+    if (regions & 0x04) {
+        read_and_parse_CONFIG_txt();
+    }
+
+    if (regions & 0x08) {
+        read_and_parse_SET_txt();
+    }
+
+    remount_usb_disk();
+
+    pc_file_written = false;
 }
