@@ -155,24 +155,33 @@ static bool flash_write_allowed(void)
 // ---------------------------------------------------------------------------  
   
 static bool park_core1(void) {  
+    // Сначала ждём, пока Core 1 отпустит ВСТРЕЧНЫЙ запрос парковки Core 0.  
+    // Парковаться самим в ожидании нельзя — deadlock: Core 1 может ждать нас.  
+    const uint32_t t0 = millis();  
+    while (core0_park_req != 0) {  
+        if (millis() - t0 > 200) {  
+            Serial.println("[FM] ERROR: core0 park held by core1");  
+            return false;  
+        }  
+        tight_loop_contents();  
+    }  
+  
     core1_park_req = true;  
     __dmb();  
     __sev();  
-    const uint32_t t0 = millis();  
+  
     while (!core1_parked) {  
-        // Если Core 1 держит встречный запрос к нам — обслуживаем,  
-        // иначе deadlock: он ждёт наш ack, мы ждём его парковку.  
-        if (core0_park_req != 0 && core0_park_req != core0_park_ack) {  
-            core0_park_poll();  
-        }  
-        if ((millis() - t0) > 200) {  
-            core1_park_req = false;  
+        if (millis() - t0 > 200) {  
             Serial.println("[FM] ERROR: core1 park timeout");  
+            core1_park_req = false;  
+            __dmb();  
+            __sev();  
             return false;  
         }  
+        tight_loop_contents();  
     }  
     return true;  
-}  
+}
   
 static void unpark_core1(void) {  
     core1_park_req = false;  

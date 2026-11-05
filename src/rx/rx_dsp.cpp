@@ -28,8 +28,10 @@
 // ---- NCO (32-бит фазовый аккумулятор) ----  
 static volatile uint32_t nco_phase = 0;  
 static volatile uint32_t nco_step  = 0;  
-  
-static volatile uint32_t clip_count = 0;  
+static volatile uint32_t clip_count = 0; 
+
+volatile uint32_t dbg_rx_start_f = 0, dbg_rx_start_lo = 0, dbg_rx_start_step = 0;  
+volatile int32_t  dbg_rx_start_nco = 0;
   
 // sin/cos LUT: 1024 точки, Q15  
 static int16_t nco_lut[1024];  
@@ -642,9 +644,11 @@ void rx_dsp_start(uint32_t freq_hz) {
     nco_step = (uint32_t)(int64_t)step;  
     nco_phase = 0;  
   
-    Serial.printf("[RX] start f=%lu lo=%lu f_nco=%ld step=0x%08lX\n",  
-              (unsigned long)freq_hz, (unsigned long)lo_hz,  
-              (long)f_nco, (unsigned long)nco_step);
+    // Диагностика для Core 0 — печатает loop(), здесь (Core 1) Serial нельзя.  
+    dbg_rx_start_f    = freq_hz;  
+    dbg_rx_start_lo   = lo_hz;  
+    dbg_rx_start_nco  = (int32_t)f_nco;  
+    dbg_rx_start_step = nco_step;  
 }  
   
 // Останов тракта (Core 0). Должен предшествовать rx_capture_stop().  
