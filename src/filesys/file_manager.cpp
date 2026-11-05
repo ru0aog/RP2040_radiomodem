@@ -84,10 +84,12 @@ static bool __not_in_flash_func(fm_clk_to_pll)(void);
 
 // Парковка Core 1 — зеркало core0_park_* из trx_control.cpp  
 volatile bool core1_park_req = false;  
-volatile bool core1_parked   = false;  
+volatile bool core1_parked   = false;
+volatile bool core1_in_loop  = false;   // Core 1 дошёл до loop1()
   
 void __not_in_flash_func(core1_park_poll)(void) {  
-    if (!core1_park_req) return;  
+    core1_in_loop = true;  
+    if (!core1_park_req) return;
     core1_parked = true;  
     __dmb();  
     __sev();  
@@ -154,28 +156,24 @@ static bool flash_write_allowed(void)
 // Core 1 обслуживает core1_park_poll() первой строкой loop1().  
 // ---------------------------------------------------------------------------  
   
+static volatile bool core1_park_timed_out = false;   // печатает Core 0 из loop()  
+  
 static bool park_core1(void) {  
-    // Сначала ждём, пока Core 1 отпустит ВСТРЕЧНЫЙ запрос парковки Core 0.  
-    // Парковаться самим в ожидании нельзя — deadlock: Core 1 может ждать нас.  
-    const uint32_t t0 = millis();  
-    while (core0_park_req != 0) {  
-        if (millis() - t0 > 200) {  
-            Serial.println("[FM] ERROR: core0 park held by core1");  
-            return false;  
-        }  
-        tight_loop_contents();  
-    }  
+    if (get_core_num() != 0) return false;  
+    if (core1_parked) return true;  
+    if (!core1_in_loop) return false;   // Core 1 ещё в setup1 — не ждём вообще  
   
     core1_park_req = true;  
     __dmb();  
     __sev();  
   
+    const uint32_t t0 = millis();  
     while (!core1_parked) {  
-        if (millis() - t0 > 200) {  
-            Serial.println("[FM] ERROR: core1 park timeout");  
+        if ((uint32_t)(millis() - t0) > 200u) {  
             core1_park_req = false;  
             __dmb();  
             __sev();  
+            core1_park_timed_out = true;   // НЕ печатаем здесь — printf может заблокировать  
             return false;  
         }  
         tight_loop_contents();  
@@ -1458,6 +1456,12 @@ void force_reset_to_default_disk(void)
 
 void check_and_handle_pc_changes(void)
 {
+
+    if (core1_park_timed_out) {  
+        core1_park_timed_out = false;  
+        Serial.println("[FM] ERROR: core1 park timeout");  
+    }
+
     // This function performs Flash operations and MSC operations.
     // It must be called from Core 0 only.
     if (get_core_num() != 0) {
