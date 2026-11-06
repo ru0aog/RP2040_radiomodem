@@ -137,18 +137,28 @@ static bool flash_write_allowed(void)
 // Multicore-safe Flash helpers
 // ---------------------------------------------------------------------------
 
-static bool __not_in_flash_func(do_flash_erase)(uint32_t off, uint32_t sz) {  
-    dbg_c0_stage = 51;                              // park_core1  
-    if (!core_sync_park_core1(0)) return false;  
-    dbg_c0_stage = 52;                              // clk->xosc  
-    if (!fm_clk_to_xosc()) { core_sync_unpark_core1(); return false; }  
-    dbg_c0_stage = 53;                              // flash_range_erase  
+static bool __not_in_flash_func(do_flash_erase)(uint32_t offset, size_t size) {  
+    dbg_c0_stage = 51;  
+    if (!core_sync_park_core1(0)) return false;   // stage 51 остаётся — маркер отказа парковки  
+  
+    // clk-switch на XOSC нужен только при разгоне: на 133 МГц SSI и так в спецификации,  
+    // а переключение clk_sys под живым ADC+DMA-потоком вешает систему.  
+    const bool need_xosc = (clock_get_hz(clk_sys) > 200000000u);  
+  
+    dbg_c0_stage = 52;  
+    if (need_xosc && !fm_clk_to_xosc()) {  
+        core_sync_unpark_core1();  
+        dbg_c0_stage = 0;  
+        return false;  
+    }  
+  
+    dbg_c0_stage = 53;  
     uint32_t ints = save_and_disable_interrupts();  
-    flash_range_erase(off, sz);  
+    flash_range_erase(offset, size);  
     restore_interrupts(ints);  
-    flash_flush_cache();  
-    dbg_c0_stage = 54;                              // clk->pll  
-    fm_clk_to_pll();  
+  
+    dbg_c0_stage = 54;  
+    if (need_xosc) fm_clk_to_pll();  
     core_sync_unpark_core1();  
     dbg_c0_stage = 0;  
     return true;  
@@ -187,19 +197,29 @@ static bool __not_in_flash_func(fm_clk_to_pll)(void) {
     return t != 0;  
 }
   
-static void __not_in_flash_func(do_flash_program)(    
-        uint32_t offset, const uint8_t* data, size_t size) {    
-    dbg_c0_stage = 61;                              // park_core1    
-    if (!core_sync_park_core1(0)) { dbg_c0_stage = 0; return; }      
-    dbg_c0_stage = 62;                              // clk->xosc + program    
-    uint32_t ints = save_and_disable_interrupts();      
-    if (fm_clk_to_xosc()) {      
-        flash_range_program(offset, data, size);      
-        fm_clk_to_pll();      
-    }      
-    restore_interrupts(ints);      
-    flash_flush_cache();      
-    dbg_c0_stage = 63;                              // unpark    
+static void __not_in_flash_func(do_flash_program)(  
+        uint32_t offset, const uint8_t* data, size_t size) {  
+    dbg_c0_stage = 61;  
+    if (!core_sync_park_core1(0)) {  
+        dbg_c0_stage = 0;  
+        return;  
+    }  
+  
+    const bool need_xosc = (clock_get_hz(clk_sys) > 200000000u);  
+  
+    if (need_xosc && !fm_clk_to_xosc()) {  
+        core_sync_unpark_core1();  
+        dbg_c0_stage = 0;  
+        return;  
+    }  
+  
+    dbg_c0_stage = 62;  
+    uint32_t ints = save_and_disable_interrupts();  
+    flash_range_program(offset, data, size);  
+    restore_interrupts(ints);  
+  
+    dbg_c0_stage = 63;  
+    if (need_xosc) fm_clk_to_pll();  
     core_sync_unpark_core1();  
     dbg_c0_stage = 0;  
 }
