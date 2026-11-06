@@ -648,4 +648,16 @@ void quad_vfo_debug(void) {
 }
 
 const quad_vfo_pll_t* quad_vfo_nominal_pll(void) { return &s_cfg.pll_nominal; }  
-const quad_vfo_pll_t* quad_vfo_active_pll(void)  { return &s_active_pll; }
+
+const quad_vfo_pll_t* quad_vfo_active_pll(void) {  
+    static quad_vfo_pll_t p;  
+    if (!s_pll_refdiv) return &s_cfg.pll_nominal;   // разгона не было — номинал  
+    p.refdiv     = s_pll_refdiv;  
+    p.fbdiv      = s_pll_fbdiv;  
+    p.p1         = s_pll_p1;  
+    p.p2         = s_pll_p2;  
+    p.clk_sys_hz = quad_vfo_clk_sys_hz();  
+    p.vsel       = quad_vfo_vsel_for(p.clk_sys_hz);  
+    p.is_oc      = !s_pll_nominal_used;  
+    return &p;  
+}

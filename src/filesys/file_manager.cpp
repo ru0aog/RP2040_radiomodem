@@ -185,7 +185,7 @@ static bool safe_flash_program(uint32_t offset, const uint8_t* data, size_t size
 }
 
 static bool __not_in_flash_func(do_flash_erase_locked)(uint32_t offset, uint32_t size) {  
-    if (!core_sync_park_core0()) {  
+    if (!core_sync_park_core0(0)) {   // 0 = дефолтный таймаут 1 с
         Serial.println("[FM] park timeout (erase)");  
         return false;  
     }  
@@ -214,7 +214,7 @@ static bool __not_in_flash_func(do_flash_erase_locked)(uint32_t offset, uint32_t
 }
   
 static bool __not_in_flash_func(do_flash_program_locked)(uint32_t offset, const uint8_t* data, uint32_t size) {  
-    if (!core_sync_park_core0()) {  
+    if (!core_sync_park_core0(0)) {   // 0 = дефолтный таймаут 1 с
         Serial.println("[FM] park timeout (program)");  
         return false;  
     }  
