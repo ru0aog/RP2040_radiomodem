@@ -199,7 +199,7 @@ static void __not_in_flash_func(rx_dma_irq)(void) {
 // ---------------------------------------------------------------------------  
 // Запуск захвата (после rx_dsp_start — NCO уже настроен)  
 // ---------------------------------------------------------------------------  
-/*
+
 void rx_capture_start(void) {
     // DMA_IRQ_0 должен жить на Core 1 (там же DSP-поллинг очереди).  
     assert(get_core_num() == 1);
@@ -278,17 +278,15 @@ void rx_capture_start(void) {
     // dma_channel_start(rx_dma_a);  
     adc_run(true);  
   
-    /*
     Serial.printf("[CAP] chA=%d chB=%d block=%u pairs transfers=%u\n",  
                   rx_dma_a, rx_dma_b,  
                   (unsigned)RX_BLOCK_SAMPLES, (unsigned)RX_BLOCK_TRANSFERS);  
     Serial.printf("[CAP] ADC target=%lu/s clkdiv=%ld\n",  
               (unsigned long)RX_ADC_SAMPLE_RATE_HZ, (long)(adc_div + 0.5f));
-    */
-/*
-}
-*/
 
+}
+
+/*
 void rx_capture_start(void) {    
     assert(get_core_num() == 1);    
     if (rx_running) return;    
@@ -365,7 +363,8 @@ void rx_capture_start(void) {
     adc_run(true);    
     Serial.println("[CAP] adc run — exit");    
 }
-  
+*/
+
 // ---------------------------------------------------------------------------  
 // Останов. Контракт: сначала rx_dsp_stop(), затем rx_capture_stop().  
 // ---------------------------------------------------------------------------  
