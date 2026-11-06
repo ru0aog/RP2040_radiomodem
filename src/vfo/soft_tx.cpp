@@ -62,7 +62,7 @@
 #define VFO_RAND_SEED_INIT 0xACE1u  
   
 // Лимиты из Flash-паспорта (OCTEST). До интеграции file_manager — дефолты.  
-uint32_t vfo_max_clk_sys_hz = 220000000;  
+uint32_t vfo_max_clk_sys_hz = 260000000;  
 uint32_t vfo_max_pll_vco_hz = 1600000000;  
   
 static inline uint64_t vfo_effective_clk_max(void) {  
