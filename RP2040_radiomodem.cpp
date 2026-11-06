@@ -250,8 +250,9 @@ void setup1() {
   vfo_on_trx_switch(TRX_RX, 3602000);    
     
   core1_pll_done = true;             // Core 0 выходит из ожидания
-  multicore_lockout_victim_init();   // Core 1 — жертва SDK-локаута для flash_safe_execute
-  
+  // multicore_lockout_victim_init() — НЕ использовать: вешает Core 1  
+  // (конфликт за SIO_IRQ_PROC1). Парковка для flash — через core_sync.
+
   delay(100);                        // старт SM
   vfo_quad_debug();                  // [LODBG] clkdiv/enabled/lo_hz    
   cat_set_freq_hz(3602000);          // зеркало FA для ответов CAT (s_rx_hz)    

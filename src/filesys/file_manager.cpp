@@ -12,9 +12,9 @@
 //
 // Flash writes:    
 //   разрешены только после file_manager_set_flash_safe_ready(true);    
-//   выполняются только с Core 0 через flash_safe_execute() SDK —    
-//   Core 1 паркуется SDK-локаутом (multicore_lockout_victim_init в setup1).    
-//   Ручной clk-switch на XOSC удалён — SDK управляет SSI сам.
+//   выполняются только с Core 0, с парковкой Core 1 через core_sync.  
+//   flash_safe_execute()/multicore_lockout НЕ используются —  
+//   victim_init конфликтует за SIO_IRQ_PROC1 и вешает Core 1.
 //  
 // ВАЖНО:  
 //   file_manager_set_flash_safe_ready(true) вызывать только после  
@@ -29,9 +29,6 @@
 #include <hardware/flash.h>
 #include <hardware/sync.h>
 #include <hardware/clocks.h>
-
-#include <pico/flash.h>
-#include <pico/error.h>
 
 #include <stddef.h>
 #include <stdint.h>
@@ -134,66 +131,44 @@ static bool flash_write_allowed(void)
 // ---------------------------------------------------------------------------  
 // Multicore-safe Flash helpers  
 //  
-// Все flash-операции идут через flash_safe_execute() SDK:  
-// Core 1 паркуется SDK-локаутом (multicore_lockout_victim_init в setup1),  
-// критичный код исполняется из RAM. Ручная парковка и clk-switch удалены.  
 // ---------------------------------------------------------------------------  
-
-// Аргументы стубов — статические: flash_safe_execute не копирует param,  
-// передаёт указатель как есть.  
-static size_t erase_size = 0;  
-  
-typedef struct {  
-    uint32_t offset;  
-    const uint8_t* data;  
-    size_t size;  
-} ProgArgs;  
-  
-static ProgArgs prog_args;  
-
-
-// Стубы для flash_safe_execute: сигнатура void (*)(void*).  
-// Выполняются в контексте локаута — только flash-вызов, ничего больше. 
-
-static void flash_range_erase_stub(void* param) {  
-    const uint32_t offset = (uint32_t)(uintptr_t)param;  
-    flash_range_erase(offset, erase_size);  
-}  
-  
-static void flash_range_program_stub(void* param) {  
-    const ProgArgs* a = (const ProgArgs*)param;  
-    flash_range_program(a->offset, a->data, a->size);  
-}  
-  
-static bool do_flash_erase(uint32_t offset, size_t size) {  
+ 
+static bool __not_in_flash_func(do_flash_erase)(uint32_t offset, size_t size) {
     dbg_c0_stage = 51;  
-    erase_size = size;  
-    flash_busy = true;  
-    __dmb();  
-    const int rc = flash_safe_execute(  
-        flash_range_erase_stub,  
-        (void*)(uintptr_t)offset,  
-        500);  
-    flash_busy = false;  
-    __dmb();  
-    dbg_c0_stage = 0;  
-    return (rc == PICO_OK);  
-}  
+    if (!core_sync_park_core1(0)) return false;  
   
-static void do_flash_program(  
-        uint32_t offset, const uint8_t* data, size_t size) {  
-    dbg_c0_stage = 61;  
-    prog_args.offset = offset;  
-    prog_args.data   = data;  
-    prog_args.size   = size;  
     flash_busy = true;  
     __dmb();  
-    flash_safe_execute(flash_range_program_stub, &prog_args, 500);  
+    const uint32_t ints = save_and_disable_interrupts();  
+    flash_range_erase(offset, size);  
+    restore_interrupts(ints);  
     flash_busy = false;  
     __dmb();  
+  
+    dbg_c0_stage = 54;  
+    core_sync_unpark_core1();  
     dbg_c0_stage = 0;  
+    return true;  
+}   
+  
+static bool __not_in_flash_func(do_flash_program)(  
+        uint32_t offset, const uint8_t* data, size_t size) {
+    dbg_c0_stage = 61;  
+    if (!core_sync_park_core1(0)) return false;  
+  
+    flash_busy = true;  
+    __dmb();  
+    const uint32_t ints = save_and_disable_interrupts();  
+    flash_range_program(offset, data, size);  
+    restore_interrupts(ints);  
+    flash_busy = false;  
+    __dmb();  
+  
+    dbg_c0_stage = 63;  
+    core_sync_unpark_core1();  
+    dbg_c0_stage = 0;  
+    return true;  
 }
-
 
 static bool safe_flash_erase(uint32_t offset, size_t size) {  
     if (!flash_write_allowed()) return false;  
