@@ -79,7 +79,8 @@ volatile bool pc_activity_detected = false;
 volatile uint8_t pc_written_regions = 0;
 
 // Определён в core_sync.cpp — печатается из check_and_handle_pc_changes().  
-extern volatile bool core1_park_timed_out;  
+extern volatile bool core1_park_timed_out;
+extern volatile uint32_t dbg_c0_stage;   // в начало file_manager.cpp
   
 static bool __not_in_flash_func(fm_clk_to_xosc)(void);    
 static bool __not_in_flash_func(fm_clk_to_pll)(void);
@@ -136,16 +137,21 @@ static bool flash_write_allowed(void)
 // Multicore-safe Flash helpers
 // ---------------------------------------------------------------------------
 
-static void __not_in_flash_func(do_flash_erase)(uint32_t offset, size_t size) {    
-    if (!core_sync_park_core1(0)) return;    
-    uint32_t ints = save_and_disable_interrupts();    
-    if (fm_clk_to_xosc()) {              // clk_sys: 373 МГц -> 12 МГц    
-        flash_range_erase(offset, size);    
-        fm_clk_to_pll();                 // обратно на PLL_SYS (VFO не тронут)    
-    }    
-    restore_interrupts(ints);    
-    flash_flush_cache();    
+static bool __not_in_flash_func(do_flash_erase)(uint32_t off, uint32_t sz) {  
+    dbg_c0_stage = 51;                              // park_core1  
+    if (!core_sync_park_core1(0)) return false;  
+    dbg_c0_stage = 52;                              // clk->xosc  
+    if (!fm_clk_to_xosc()) { core_sync_unpark_core1(); return false; }  
+    dbg_c0_stage = 53;                              // flash_range_erase  
+    uint32_t ints = save_and_disable_interrupts();  
+    flash_range_erase(off, sz);  
+    restore_interrupts(ints);  
+    flash_flush_cache();  
+    dbg_c0_stage = 54;                              // clk->pll  
+    fm_clk_to_pll();  
     core_sync_unpark_core1();  
+    dbg_c0_stage = 0;  
+    return true;  
 }
 
 // Перевод clk_sys на XOSC и обратно на PLL_SYS — только mux, PLL не трогаем.  
@@ -181,17 +187,21 @@ static bool __not_in_flash_func(fm_clk_to_pll)(void) {
     return t != 0;  
 }
   
-static void __not_in_flash_func(do_flash_program)(  
-        uint32_t offset, const uint8_t* data, size_t size) {  
-    if (!core_sync_park_core1(0)) return;    
-    uint32_t ints = save_and_disable_interrupts();    
-    if (fm_clk_to_xosc()) {    
-        flash_range_program(offset, data, size);    
-        fm_clk_to_pll();    
-    }    
-    restore_interrupts(ints);    
-    flash_flush_cache();    
-    core_sync_unpark_core1();
+static void __not_in_flash_func(do_flash_program)(    
+        uint32_t offset, const uint8_t* data, size_t size) {    
+    dbg_c0_stage = 61;                              // park_core1    
+    if (!core_sync_park_core1(0)) { dbg_c0_stage = 0; return; }      
+    dbg_c0_stage = 62;                              // clk->xosc + program    
+    uint32_t ints = save_and_disable_interrupts();      
+    if (fm_clk_to_xosc()) {      
+        flash_range_program(offset, data, size);      
+        fm_clk_to_pll();      
+    }      
+    restore_interrupts(ints);      
+    flash_flush_cache();      
+    dbg_c0_stage = 63;                              // unpark    
+    core_sync_unpark_core1();  
+    dbg_c0_stage = 0;  
 }
   
 static bool safe_flash_erase(uint32_t offset, size_t size) {  
@@ -475,169 +485,176 @@ static uint32_t slot_crc_flash(const uint8_t* base)
 // Save state ring
 // ---------------------------------------------------------------------------
 
-void save_state(void)
-{
-    if (!flash_write_allowed()) {
-        return;
-    }
-
-    if (trx_state() != TRX_RX) {
-        return;
-    }
-
-    int32_t next_slot =
-        (current_active_slot + 1) % SLOTS;
-
-    uint32_t next_seq =
-        current_max_seq + 1;
-
-    if (current_active_slot == -1) {
-        next_slot = 0;
-        next_seq = 1;
-    }
-
-    SlotMeta meta;
-
-    memset(&meta, 0xFF, sizeof(meta));
-
-    meta.magic = SLOT_MAGIC;
-    meta.seq = next_seq;
-    meta.crc32 = 0;
-    meta.log_write_ptr = log_write_ptr;
-
-    // Calculate CRC over the complete slot:
-    // RAM disk + 0xFF padding + metadata with crc32 set to zero.
-
-    uint32_t crc = 0xFFFFFFFFu;
-    uint32_t off = 0;
-
-    while (off < SLOT_META_OFF) {
-        uint32_t avail = 0;
-
-        const uint8_t* src =
-            slot_src(off, &avail);
-
-        if (avail == 0 || off + avail > SLOT_META_OFF) {
-            Serial.println("[FM] ERROR: invalid slot source range");
-            return;
-        }
-
-        if (src != nullptr) {
-            crc = crc32_update(crc, src, avail);
-        }
-        else {
-            for (uint32_t n = 0; n < avail; ++n) {
-                crc ^= 0xFF;
-
-                for (int b = 0; b < 8; ++b) {
-                    crc = (crc >> 1) ^
-                        (0xEDB88320u & (-(int32_t)(crc & 1)));
-                }
-            }
-        }
-
-        off += avail;
-    }
-
-    crc = crc32_update(
-        crc,
-        reinterpret_cast<const uint8_t*>(&meta),
-        offsetof(SlotMeta, crc32)
-    );
-
-    const uint8_t zeros[4] = {0, 0, 0, 0};
-
-    crc = crc32_update(crc, zeros, sizeof(zeros));
-
-    crc = crc32_update(
-        crc,
-        reinterpret_cast<const uint8_t*>(&meta) +
-            offsetof(SlotMeta, crc32) + 4,
-        sizeof(SlotMeta) -
-            offsetof(SlotMeta, crc32) - 4
-    );
-
-    meta.crc32 = ~crc;
-
-    const uint32_t target =
-        RING_OFFSET +
-        (uint32_t)next_slot * SLOT_SIZE;
-
-    if (!safe_flash_erase(target, SLOT_SIZE)) {
-        Serial.println("[FM] ERROR: state-slot erase failed");
-        return;
-    }
-
-    off = 0;
-
-    while (off < SLOT_SIZE) {
-        alignas(4) uint8_t page[FLASH_PAGE_SIZE];
-
-        uint32_t avail = 0;
-
-        const uint8_t* src =
-            slot_src(off, &avail);
-
-        uint32_t chunk =
-            avail < FLASH_PAGE_SIZE ?
-            avail : FLASH_PAGE_SIZE;
-
-        if (chunk == 0 ||
-            off + chunk > SLOT_SIZE) {
-            Serial.println("[FM] ERROR: invalid state-slot page range");
-            return;
-        }
-
-        if (off >= SLOT_META_OFF) {
-            const uint32_t mo = off - SLOT_META_OFF;
-
-            chunk = FLASH_PAGE_SIZE;
-
-            memset(page, 0xFF, chunk);
-
-            if (mo < sizeof(SlotMeta)) {
-                uint32_t n = sizeof(SlotMeta) - mo;
-
-                if (n > chunk) {
-                    n = chunk;
-                }
-
-                memcpy(
-                    page,
-                    reinterpret_cast<const uint8_t*>(&meta) + mo,
-                    n
-                );
-            }
-        }
-        else if (src != nullptr) {
-            memcpy(page, src, chunk);
-        }
-        else {
-            memset(page, 0xFF, chunk);
-        }
-
-        if (!safe_flash_program(target + off, page, chunk)) {
-            Serial.printf(
-                "[FM] ERROR: state-slot program failed at 0x%06lx\n",
-                (unsigned long)(target + off)
-            );
-
-            return;
-        }
-
-        off += chunk;
-    }
-
-    flash_flush_cache();
-
-    current_active_slot = next_slot;
-    current_max_seq = next_seq;
-
-    Serial.printf(
-        "[FM] save_state: slot=%ld seq=%lu\n",
-        (long)next_slot,
-        (unsigned long)next_seq
-    );
+void save_state(void)  
+{  
+    dbg_c0_stage = 55;  
+  
+    if (!flash_write_allowed()) {  
+        dbg_c0_stage = 0;  
+        return;  
+    }  
+  
+    if (trx_state() != TRX_RX) {  
+        dbg_c0_stage = 0;  
+        return;  
+    }  
+  
+    int32_t next_slot =  
+        (current_active_slot + 1) % SLOTS;  
+  
+    uint32_t next_seq =  
+        current_max_seq + 1;  
+  
+    if (current_active_slot == -1) {  
+        next_slot = 0;  
+        next_seq = 1;  
+    }  
+  
+    SlotMeta meta;  
+  
+    memset(&meta, 0xFF, sizeof(meta));  
+  
+    meta.magic = SLOT_MAGIC;  
+    meta.seq = next_seq;  
+    meta.crc32 = 0;  
+    meta.log_write_ptr = log_write_ptr;  
+  
+    uint32_t crc = 0xFFFFFFFFu;  
+    uint32_t off = 0;  
+  
+    while (off < SLOT_META_OFF) {  
+        uint32_t avail = 0;  
+  
+        const uint8_t* src =  
+            slot_src(off, &avail);  
+  
+        if (avail == 0 || off + avail > SLOT_META_OFF) {  
+            Serial.println("[FM] ERROR: invalid slot source range");  
+            dbg_c0_stage = 0;  
+            return;  
+        }  
+  
+        if (src != nullptr) {  
+            crc = crc32_update(crc, src, avail);  
+        }  
+        else {  
+            for (uint32_t n = 0; n < avail; ++n) {  
+                crc ^= 0xFF;  
+  
+                for (int b = 0; b < 8; ++b) {  
+                    crc = (crc >> 1) ^  
+                        (0xEDB88320u & (-(int32_t)(crc & 1)));  
+                }  
+            }  
+        }  
+  
+        off += avail;  
+    }  
+  
+    crc = crc32_update(  
+        crc,  
+        reinterpret_cast<const uint8_t*>(&meta),  
+        offsetof(SlotMeta, crc32)  
+    );  
+  
+    const uint8_t zeros[4] = {0, 0, 0, 0};  
+  
+    crc = crc32_update(crc, zeros, sizeof(zeros));  
+  
+    crc = crc32_update(  
+        crc,  
+        reinterpret_cast<const uint8_t*>(&meta) +  
+            offsetof(SlotMeta, crc32) + 4,  
+        sizeof(SlotMeta) -  
+            offsetof(SlotMeta, crc32) - 4  
+    );  
+  
+    meta.crc32 = ~crc;  
+  
+    const uint32_t target =  
+        RING_OFFSET +  
+        (uint32_t)next_slot * SLOT_SIZE;  
+  
+    if (!safe_flash_erase(target, SLOT_SIZE)) {  
+        Serial.println("[FM] ERROR: state-slot erase failed");  
+        dbg_c0_stage = 0;  
+        return;  
+    }  
+  
+    off = 0;  
+  
+    while (off < SLOT_SIZE) {  
+        alignas(4) uint8_t page[FLASH_PAGE_SIZE];  
+  
+        uint32_t avail = 0;  
+  
+        const uint8_t* src =  
+            slot_src(off, &avail);  
+  
+        uint32_t chunk =  
+            avail < FLASH_PAGE_SIZE ?  
+            avail : FLASH_PAGE_SIZE;  
+  
+        if (chunk == 0 ||  
+            off + chunk > SLOT_SIZE) {  
+            Serial.println("[FM] ERROR: invalid state-slot page range");  
+            dbg_c0_stage = 0;  
+            return;  
+        }  
+  
+        if (off >= SLOT_META_OFF) {  
+            const uint32_t mo = off - SLOT_META_OFF;  
+  
+            chunk = FLASH_PAGE_SIZE;  
+  
+            memset(page, 0xFF, chunk);  
+  
+            if (mo < sizeof(SlotMeta)) {  
+                uint32_t n = sizeof(SlotMeta) - mo;  
+  
+                if (n > chunk) {  
+                    n = chunk;  
+                }  
+  
+                memcpy(  
+                    page,  
+                    reinterpret_cast<const uint8_t*>(&meta) + mo,  
+                    n  
+                );  
+            }  
+        }  
+        else if (src != nullptr) {  
+            memcpy(page, src, chunk);  
+        }  
+        else {  
+            memset(page, 0xFF, chunk);  
+        }  
+  
+        if (!safe_flash_program(target + off, page, chunk)) {  
+            Serial.printf(  
+                "[FM] ERROR: state-slot program failed at 0x%06lx\n",  
+                (unsigned long)(target + off)  
+            );  
+  
+            dbg_c0_stage = 0;  
+            return;  
+        }  
+  
+        off += chunk;  
+    }  
+  
+    flash_flush_cache();  
+  
+    current_active_slot = next_slot;  
+    current_max_seq = next_seq;  
+  
+    Serial.printf(  
+        "[FM] save_state: slot=%ld seq=%lu\n",  
+        (long)next_slot,  
+        (unsigned long)next_seq  
+    );  
+  
+    dbg_c0_stage = 0;  
 }
 
 // ---------------------------------------------------------------------------
@@ -1405,96 +1422,98 @@ void force_reset_to_default_disk(void)
 // Process PC changes and deferred state saves
 // ---------------------------------------------------------------------------
 
-void check_and_handle_pc_changes(void)
-{
-
-    if (core1_park_timed_out) {  
-        core1_park_timed_out = false;  
-        Serial.println("[FM] ERROR: core1 park timeout");  
-    }
-
-    // This function performs Flash operations and MSC operations.
-    // It must be called from Core 0 only.
-    if (get_core_num() != 0) {
-        return;
-    }
-
-    if (state_save_pending) {  
-        if (!flash_write_allowed()) {  
-            return;  
-        }  
+void check_and_handle_pc_changes(void)  
+{  
   
-        if (trx_state() != TRX_RX) {  
-            return;  
-        }  
+    if (core1_park_timed_out) {    
+        core1_park_timed_out = false;    
+        Serial.println("[FM] ERROR: core1 park timeout");    
+    }  
   
-        save_state();
-
-        // save_state() may return without writing if Flash safety
-        // is not enabled. Keep the pending flag in that case.
-        if (current_active_slot < 0 ||
-            current_max_seq == 0) {
-            return;
-        }
-
-        state_save_pending = false;  
-  
-        String hdr =  
-            "\r\n=== session start, seq=" +  
-            String(current_max_seq) +  
-            " ===\r\n";
-
-        log_append(
-            reinterpret_cast<const uint8_t*>(hdr.c_str()),
-            (uint32_t)hdr.length()
-        );
-
-        remount_usb_disk();
-    }
-
-    if (!pc_activity_detected) {  
+    // This function performs Flash operations and MSC operations.  
+    // It must be called from Core 0 only.  
+    if (get_core_num() != 0) {  
         return;  
     }  
   
-    if (pc_written_regions == 0) {  
-        // Flush без записей — нечего сохранять.  
-        pc_activity_detected = false;  
+    if (state_save_pending) {    
+        if (!flash_write_allowed()) {    
+            return;    
+        }    
+    
+        if (trx_state() != TRX_RX) {    
+            return;    
+        }    
+    
+        save_state();          // внутри — dbg_c0_stage = 55  
+  
+        // save_state() may return without writing if Flash safety  
+        // is not enabled. Keep the pending flag in that case.  
+        if (current_active_slot < 0 ||  
+            current_max_seq == 0) {  
+            return;  
+        }  
+  
+        state_save_pending = false;    
+    
+        String hdr =    
+            "\r\n=== session start, seq=" +    
+            String(current_max_seq) +    
+            " ===\r\n";  
+  
+        dbg_c0_stage = 56;     // log_append — тоже flash-путь  
+        log_append(  
+            reinterpret_cast<const uint8_t*>(hdr.c_str()),  
+            (uint32_t)hdr.length()  
+        );  
+        dbg_c0_stage = 0;  
+  
+        remount_usb_disk();  
+    }  
+  
+    if (!pc_activity_detected) {    
+        return;    
+    }    
+    
+    if (pc_written_regions == 0) {    
+        // Flush без записей — нечего сохранять.    
+        pc_activity_detected = false;    
+        return;    
+    }    
+    
+    if ((uint32_t)(millis() - last_msc_write_time) < 1500u) {    
+        return;    
+    }  
+  
+    if (!flash_write_allowed()) {  
         return;  
     }  
   
-    if ((uint32_t)(millis() - last_msc_write_time) < 1500u) {  
+    if (trx_state() != TRX_RX) {  
         return;  
-    }
-
-    if (!flash_write_allowed()) {
-        return;
-    }
-
-    if (trx_state() != TRX_RX) {
-        return;
-    }
-
-    const uint8_t regions = pc_written_regions;  
+    }  
   
-    Serial.printf("[FM] PC write: regions=0x%02X\n", (unsigned)regions);  
-    save_state();  
+    const uint8_t regions = pc_written_regions;    
+    
+    Serial.printf("[FM] PC write: regions=0x%02X\n", (unsigned)regions);    
+    save_state();              // внутри — dbg_c0_stage = 55  
+    
+    pc_activity_detected = false;    
+    pc_written_regions = 0;  
   
-    pc_activity_detected = false;  
-    pc_written_regions = 0;
-
-    if (regions & 0x02) {
-        read_and_parse_INFO_txt();
-    }
-
-    if (regions & 0x04) {
-        read_and_parse_CONFIG_txt();
-    }
-
-    if (regions & 0x08) {
-        read_and_parse_SET_txt();
-    }
-
-    remount_usb_disk();
-
-    pc_file_written = false;
+    if (regions & 0x02) {  
+        read_and_parse_INFO_txt();  
+    }  
+  
+    if (regions & 0x04) {  
+        read_and_parse_CONFIG_txt();  
+    }  
+  
+    if (regions & 0x08) {  
+        read_and_parse_SET_txt();  
+    }  
+  
+    remount_usb_disk();  
+  
+    pc_file_written = false;  
 }

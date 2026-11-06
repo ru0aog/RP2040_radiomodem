@@ -214,7 +214,7 @@ void loop() {
   
   // --- sync: каждые 500 мс (диагностика зависания) ---  
   static uint32_t t_sync = 0;  
-  if (millis() - t_sync > 500) {  
+  if (millis() - t_sync > 150) {  
     t_sync = millis();  
     core_sync_stats st;  
     core_sync_get_stats(&st);  
