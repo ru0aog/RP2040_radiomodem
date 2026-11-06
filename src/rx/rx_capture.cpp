@@ -17,7 +17,8 @@
 #include "hardware/adc.h"  
 #include "hardware/dma.h"  
 #include "hardware/irq.h"  
-#include "hardware/sync.h"  
+#include "hardware/sync.h"
+#include <hardware/structs/ssi.h>
   
 // Пины ADC — из карты пинов проекта; запасные дефолты по pins.h.  
 #ifndef RX_ADC_PIN_I  
@@ -187,9 +188,8 @@ static void __not_in_flash_func(rx_handle_completed_channel)(
 // ---------------------------------------------------------------------------  
 static void __not_in_flash_func(rx_dma_irq)(void) {    
     ++rx_cap_isr_count;    
-  
     static bool first_irq = true;  
-    if (first_irq) { first_irq = false; gpio_put(11, 1); }   // LED-маркер: первый DMA IRQ  
+    if (first_irq) { first_irq = false; gpio_put(12, 1); }
     if (first_irq) { first_irq = false; Serial.println("[CAP] m12: first dma irq"); }  
   
     const int a = rx_dma_a;    
@@ -234,6 +234,9 @@ void __not_in_flash_func(rx_capture_start)(void) {
   
     Serial.println("[CAP] m2: clocks read");   // МАРКЕР  
   
+    Serial.printf("[CAP] m2: clocks read  ssi baudr=%lu ssienr=%lu\n",  
+              (unsigned long)ssi_hw->baudr, (unsigned long)ssi_hw->ssienr);
+
     // ADC: round-robin ADC0/ADC1, FIFO + DREQ, threshold=1  
     adc_init();    
     Serial.println("[CAP] m3: adc_init");   // МАРКЕР  

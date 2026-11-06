@@ -242,19 +242,19 @@ void setup1() {
 }  
   
 void loop1() {  
-  ++dbg_l1;  
-  dbg_c1_stage = 1;  
+  static uint32_t hb = 0;  
+  if ((++hb & 0x3FFFF) == 0) gpio_xor_mask(1u << 11);   // heartbeat: мигание = Core 1 жив  
+  
   core_sync_core1_poll();  
-  dbg_c1_stage = 2;  
-  trx_poll_core1();   
-  if (trx_state() == TRX_RX) {    
-    dbg_c1_stage = 3;  
-    ++dbg_poll_in;    
-    rx_dsp_poll();    
-    ++dbg_poll_out;    
-  } else {    
-    dbg_c1_stage = 4;  
-    vfo_poll();    
-  }    
-  dbg_c1_stage = 0;  
+  static bool m13 = true; if (m13) { m13=false; Serial.println("[L1] m13: sync poll ok"); }  
+  
+  trx_poll_core1();  
+  static bool m14 = true; if (m14) { m14=false; Serial.println("[L1] m14: trx poll ok"); }  
+  
+  if (trx_state() == TRX_RX) {  
+    rx_dsp_poll();  
+    static bool m15 = true; if (m15) { m15=false; Serial.println("[L1] m15: dsp poll ok"); }  
+  } else {  
+    vfo_poll();  
+  }  
 }
