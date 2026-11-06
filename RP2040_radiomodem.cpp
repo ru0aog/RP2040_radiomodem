@@ -15,6 +15,8 @@
   
 #include <Arduino.h>  
 #include <pico/flash.h>
+#include "pico/multicore.h"
+
 #include "src/mem/mem_arena.h"  
 #include "src/rx/rx_capture.h"  
 #include "src/rx/rx_dsp.h"  
@@ -238,7 +240,8 @@ void loop() {
 // ============================================================================  
 // SETUP1 — Core 1  
 // ============================================================================  
-void setup1() {  
+void setup1() {
+  multicore_lockout_victim_init();   // Core 1 — жертва SDK-локаута для flash_safe_execute
  
   while (!core0_ready) tight_loop_contents();  
 
@@ -247,9 +250,9 @@ void setup1() {
   // с core0_park_poll — handshake обслуживается).  
   vfo_on_trx_switch(TRX_RX, 3602000);    
     
-  core1_pll_done = true;             // Core 0 выходит из ожидания    
-    
-  delay(100);                        // старт SM    
+  core1_pll_done = true;             // Core 0 выходит из ожидания
+  
+  delay(100);                        // старт SM
   vfo_quad_debug();                  // [LODBG] clkdiv/enabled/lo_hz    
   cat_set_freq_hz(3602000);          // зеркало FA для ответов CAT (s_rx_hz)    
   rx_dsp_start(3602000);             // NCO = f_rx - vfo_quad_lo_hz()

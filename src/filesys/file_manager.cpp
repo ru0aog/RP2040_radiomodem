@@ -10,11 +10,11 @@
 //   SlotMeta и CRC32;
 //   существующий USB MSC API.
 //
-// Flash writes:  
-//   разрешены только после file_manager_set_flash_safe_ready(true);  
-//   выполняются только с Core 0, с парковкой Core 1 через core_sync  
-//   и переводом clk_sys на XOSC (fm_clk_to_xosc/fm_clk_to_pll).  
-//   flash_safe_execute() SDK НЕ используется.  
+// Flash writes:    
+//   разрешены только после file_manager_set_flash_safe_ready(true);    
+//   выполняются только с Core 0 через flash_safe_execute() SDK —    
+//   Core 1 паркуется SDK-локаутом (multicore_lockout_victim_init в setup1).    
+//   Ручной clk-switch на XOSC удалён — SDK управляет SSI сам.
 //  
 // ВАЖНО:  
 //   file_manager_set_flash_safe_ready(true) вызывать только после  
@@ -83,9 +83,6 @@ volatile uint8_t pc_written_regions = 0;
 extern volatile bool core1_park_timed_out;
 extern volatile uint32_t dbg_c0_stage;   // в начало file_manager.cpp
   
-static bool __not_in_flash_func(fm_clk_to_xosc)(void);    
-static bool __not_in_flash_func(fm_clk_to_pll)(void);
-
 // ---------------------------------------------------------------------------
 // Internal state
 // ---------------------------------------------------------------------------
@@ -134,105 +131,70 @@ static bool flash_write_allowed(void)
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// Multicore-safe Flash helpers
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------  
+// Multicore-safe Flash helpers  
+//  
+// Все flash-операции идут через flash_safe_execute() SDK:  
+// Core 1 паркуется SDK-локаутом (multicore_lockout_victim_init в setup1),  
+// критичный код исполняется из RAM. Ручная парковка и clk-switch удалены.  
+// ---------------------------------------------------------------------------  
 
-static bool __not_in_flash_func(do_flash_erase)(uint32_t offset, size_t size) {  
-    dbg_c0_stage = 51;  
-    if (!core_sync_park_core1(0)) return false;   // stage 51 остаётся — маркер отказа парковки  
+// Аргументы стубов — статические: flash_safe_execute не копирует param,  
+// передаёт указатель как есть.  
+static size_t erase_size = 0;  
   
-    // clk-switch на XOSC нужен только при разгоне: на 133 МГц SSI и так в спецификации,  
-    // а переключение clk_sys под живым ADC+DMA-потоком вешает систему.  
-    const bool need_xosc = (clock_get_hz(clk_sys) > 200000000u);  
+typedef struct {  
+    uint32_t offset;  
+    const uint8_t* data;  
+    size_t size;  
+} ProgArgs;  
   
-    dbg_c0_stage = 52;  
-    if (need_xosc && !fm_clk_to_xosc()) {  
-        core_sync_unpark_core1();  
-        dbg_c0_stage = 0;  
-        return false;  
-    }  
-  
-    flash_busy = true;                          // msc_read_cb отдаст нули вместо XIP  
-    __dmb();  
-    uint32_t ints = save_and_disable_interrupts();  
-    dbg_c0_stage = 53;  
-    flash_range_erase(offset, size);  
-    restore_interrupts(ints);  
-    flash_busy = false;  
-    __dmb();  
-  
-    dbg_c0_stage = 54;  
-    if (need_xosc) fm_clk_to_pll();  
-    core_sync_unpark_core1();  
-    dbg_c0_stage = 0;  
-    return true;  
-}
+static ProgArgs prog_args;  
 
-// Перевод clk_sys на XOSC и обратно на PLL_SYS — только mux, PLL не трогаем.  
-// Вызывать ТОЛЬКО с отключёнными IRQ и припаркованным Core 1.  
-static bool __not_in_flash_func(fm_clk_to_xosc)(void) {  
-    clock_hw_t *c = &clocks_hw->clk[clk_sys];  
-    hw_clear_bits(&c->ctrl, CLOCKS_CLK_SYS_CTRL_SRC_BITS);  
-    uint32_t t = 200000u;  
-    while (!(c->selected & 1u) && --t) {}  
-    if (!t) return false;  
-    hw_write_masked(&c->ctrl,  
-        CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_XOSC_CLKSRC << CLOCKS_CLK_SYS_CTRL_AUXSRC_LSB,  
-        CLOCKS_CLK_SYS_CTRL_AUXSRC_BITS);  
-    c->div = 1u << CLOCKS_CLK_SYS_DIV_INT_LSB;  
-    hw_set_bits(&c->ctrl, CLOCKS_CLK_SYS_CTRL_SRC_BITS);  
-    t = 200000u;  
-    while (!(c->selected & 2u) && --t) {}  
-    return t != 0;  
+
+// Стубы для flash_safe_execute: сигнатура void (*)(void*).  
+// Выполняются в контексте локаута — только flash-вызов, ничего больше. 
+
+static void flash_range_erase_stub(void* param) {  
+    const uint32_t offset = (uint32_t)(uintptr_t)param;  
+    flash_range_erase(offset, erase_size);  
 }  
   
-static bool __not_in_flash_func(fm_clk_to_pll)(void) {  
-    clock_hw_t *c = &clocks_hw->clk[clk_sys];  
-    hw_clear_bits(&c->ctrl, CLOCKS_CLK_SYS_CTRL_SRC_BITS);  
-    uint32_t t = 200000u;  
-    while (!(c->selected & 1u) && --t) {}  
-    if (!t) return false;  
-    hw_write_masked(&c->ctrl,  
-        CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS << CLOCKS_CLK_SYS_CTRL_AUXSRC_LSB,  
-        CLOCKS_CLK_SYS_CTRL_AUXSRC_BITS);  
-    hw_set_bits(&c->ctrl, CLOCKS_CLK_SYS_CTRL_SRC_BITS);  
-    t = 200000u;  
-    while (!(c->selected & 2u) && --t) {}  
-    return t != 0;  
-}
+static void flash_range_program_stub(void* param) {  
+    const ProgArgs* a = (const ProgArgs*)param;  
+    flash_range_program(a->offset, a->data, a->size);  
+}  
   
-static void __not_in_flash_func(do_flash_program)(  
-        uint32_t offset, const uint8_t* data, size_t size) {  
-    dbg_c0_stage = 61;  
-    if (!core_sync_park_core1(0)) {  
-        dbg_c0_stage = 0;  
-        return;  
-    }  
-  
-    const bool need_xosc = (clock_get_hz(clk_sys) > 200000000u);  
-  
-    if (need_xosc && !fm_clk_to_xosc()) {  
-        core_sync_unpark_core1();  
-        dbg_c0_stage = 0;  
-        return;  
-    }  
-  
+static bool do_flash_erase(uint32_t offset, size_t size) {  
+    dbg_c0_stage = 51;  
+    erase_size = size;  
     flash_busy = true;  
     __dmb();  
-    uint32_t ints = save_and_disable_interrupts();  
-    dbg_c0_stage = 62;  
-    flash_range_program(offset, data, size);  
-    restore_interrupts(ints);  
+    const int rc = flash_safe_execute(  
+        flash_range_erase_stub,  
+        (void*)(uintptr_t)offset,  
+        500);  
     flash_busy = false;  
     __dmb();  
+    dbg_c0_stage = 0;  
+    return (rc == PICO_OK);  
+}  
   
-    dbg_c0_stage = 63;  
-    if (need_xosc) fm_clk_to_pll();  
-    core_sync_unpark_core1();  
+static void do_flash_program(  
+        uint32_t offset, const uint8_t* data, size_t size) {  
+    dbg_c0_stage = 61;  
+    prog_args.offset = offset;  
+    prog_args.data   = data;  
+    prog_args.size   = size;  
+    flash_busy = true;  
+    __dmb();  
+    flash_safe_execute(flash_range_program_stub, &prog_args, 500);  
+    flash_busy = false;  
+    __dmb();  
     dbg_c0_stage = 0;  
 }
-  
+
+
 static bool safe_flash_erase(uint32_t offset, size_t size) {  
     if (!flash_write_allowed()) return false;  
     if (size == 0 ||  
@@ -241,8 +203,7 @@ static bool safe_flash_erase(uint32_t offset, size_t size) {
         Serial.println("[FM] ERROR: invalid Flash erase alignment");  
         return false;  
     }
-    do_flash_erase(offset, size);    
-    return true;
+    return do_flash_erase(offset, size);
 }  
   
 static bool safe_flash_program(uint32_t offset, const uint8_t* data, size_t size) {  
@@ -256,6 +217,7 @@ static bool safe_flash_program(uint32_t offset, const uint8_t* data, size_t size
     do_flash_program(offset, data, size);  
     return true;  
 }
+
 
 // ---------------------------------------------------------------------------
 // CRC32
