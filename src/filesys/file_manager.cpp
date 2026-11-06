@@ -576,8 +576,9 @@ void save_state(void) {
     flash_flush_cache();      
     
     current_active_slot = next_slot;      
-    current_max_seq = next_seq;      
-     
+    current_max_seq = next_seq;
+    Serial.printf("[FM] save_state: slot=%ld seq=%lu\n",  
+        (long)next_slot, (unsigned long)next_seq);
 }
 
 // ---------------------------------------------------------------------------
