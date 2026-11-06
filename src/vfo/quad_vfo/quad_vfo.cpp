@@ -124,7 +124,8 @@ void quad_vfo_default_cfg(quad_vfo_cfg_t *cfg) {
 
   cfg->pll_nominal = { 133, 6, 2, 133000000u,
                        (uint32_t)VREG_VOLTAGE_DEFAULT, false, 1 };
-  cfg->pll_ceiling = { 95, 3, 1, 134000000u,
+// Потолок разгона: 12 МГц * 225 / (4*2) = 337.5 МГц, VCO = 2700 МГц.  
+  cfg->pll_ceiling = { 225, 4, 2, 337500000u,  
                        (uint32_t)VREG_VOLTAGE_1_30, true, 1 };
 
   cfg->xosc_hz = 12000000ULL;

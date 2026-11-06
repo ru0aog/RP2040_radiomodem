@@ -169,7 +169,7 @@ void loop() {
     }  
   }  
   
-  dbg_c0_stage = 1;  cat_poll();                     // разбор команд с основного CDC, разделитель ';'  
+  dbg_c0_stage = 1;  cat_poll();                  // разбор команд с основного CDC, разделитель ';'  
   dbg_c0_stage = 2;  tx_job_poll();  
   dbg_c0_stage = 3;  rx_decoders_poll();  
   dbg_c0_stage = 4;  rsid_poll();                 // печать "# RSID ..." + автопереключение моды  
@@ -212,26 +212,6 @@ void loop() {
                   (unsigned long)dbg_c1_stage,  
                   (unsigned long)dbg_l1, (unsigned long)dbg_poll_in,  
                   (unsigned long)dbg_poll_out); 
-  }  
-
-  
-  // --- sync: каждые 500 мс (диагностика зависания) ---  
-  static uint32_t t_sync = 0;  
-  if (millis() - t_sync > 1000) {  
-    t_sync = millis();  
-    core_sync_stats st;  
-    core_sync_get_stats(&st);  
-    Serial.printf("sync: p0 req=%lu ack=%lu to=%lu dead=%lu | "  
-                  "p1 req=%lu ack=%lu to=%lu dead=%lu | "  
-                  "c0=%lu c1=%lu l1=%lu pin=%lu pout=%lu\n",  
-                  (unsigned long)st.park0_requests, (unsigned long)st.park0_ack,  
-                  (unsigned long)st.park0_timeouts, (unsigned long)st.park0_dead_initiator,  
-                  (unsigned long)st.park1_requests, (unsigned long)st.park1_ack,  
-                  (unsigned long)st.park1_timeouts, (unsigned long)st.park1_dead_initiator,  
-                  (unsigned long)dbg_c0_stage,  
-                  (unsigned long)dbg_c1_stage,  
-                  (unsigned long)dbg_l1, (unsigned long)dbg_poll_in,  
-                  (unsigned long)dbg_poll_out);  
   }  
 
 }

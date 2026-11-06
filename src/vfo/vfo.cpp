@@ -21,8 +21,8 @@ int32_t vfo_xosc_corr_ppb = VFO_XOSC_DEFAULT_PPB;
   
 // Пределы разгона по умолчанию (если soft_tx их не переопределит).  
 // Паспорт OCTEST записывает сюда свои значения до vfo_init().  
-__attribute__((weak)) uint32_t vfo_max_clk_sys_hz = 150000000UL;  
-__attribute__((weak)) uint32_t vfo_max_pll_vco_hz = 1500000000ULL;  
+__attribute__((weak)) uint32_t vfo_max_clk_sys_hz = 420000000UL;  
+__attribute__((weak)) uint32_t vfo_max_pll_vco_hz = 3000000000ULL;
   
 // ---- Состояние ----  
 static VfoBank    s_bank;  
