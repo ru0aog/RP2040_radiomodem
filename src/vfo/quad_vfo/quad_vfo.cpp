@@ -129,8 +129,8 @@ void quad_vfo_default_cfg(quad_vfo_cfg_t *cfg) {
                        (uint32_t)VREG_VOLTAGE_1_30, true, 1 };
 
   cfg->xosc_hz = 12000000ULL;
-  cfg->clk_sys_min_hz = 120000000ULL;
-  cfg->clk_sys_max_hz = 133000000ULL;
+  cfg->clk_sys_min_hz = 180000000ULL;
+  cfg->clk_sys_max_hz = 240000000ULL;
   cfg->pll_vco_max_hz = QUAD_VCO_HW_MAX_HZ;
   cfg->clk_sys_nominal_hz = 133000000ULL;
 
