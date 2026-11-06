@@ -170,7 +170,7 @@ void __not_in_flash_func(core_sync_unpark_core0)(void) {
 // ============================================================================  
 // Парковка Core 1 — инициатор Core 0 (логика из file_manager.cpp)  
 // ============================================================================  
-bool core_sync_park_core1(uint32_t timeout_ms) {  
+bool __not_in_flash_func(core_sync_park_core1)(uint32_t timeout_ms) {
     if (get_core_num() != 0) return false;  
     if (core1_parked) { s_stats.park_reentrant++; return true; }  
     if (!core1_in_loop) return false;   // Core 1 ещё в setup1 — не ждём  
@@ -198,7 +198,7 @@ bool core_sync_park_core1(uint32_t timeout_ms) {
     return true;  
 }  
   
-void core_sync_unpark_core1(void) {  
+void __not_in_flash_func(core_sync_unpark_core1)(void) {
     core1_park_req = false;  
     __dmb();  
     __sev();  
