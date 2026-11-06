@@ -12,7 +12,8 @@
 //
 // Flash writes:    
 //   разрешены только после file_manager_set_flash_safe_ready(true);    
-//   выполняются только с Core 0, с парковкой Core 1 через core_sync.  
+//   выполняются только с Core 0, с парковкой Core 1 через core_sync  
+//   (парковка останавливает DMA-захват на время flash-окна).
 //   flash_safe_execute()/multicore_lockout НЕ используются —  
 //   victim_init конфликтует за SIO_IRQ_PROC1 и вешает Core 1.
 //  
@@ -78,7 +79,6 @@ volatile uint8_t pc_written_regions = 0;
 
 // Определён в core_sync.cpp — печатается из check_and_handle_pc_changes().  
 extern volatile bool core1_park_timed_out;
-extern volatile uint32_t dbg_c0_stage;   // в начало file_manager.cpp
   
 // ---------------------------------------------------------------------------
 // Internal state
@@ -91,7 +91,7 @@ static volatile bool state_save_pending = false;
 static bool usb_started = false;
 static bool file_manager_prepared = false;
 
-// Flash writes are disabled until explicitly enabled.
+// Записи во flash запрещены, пока явно не разрешены.  
 static volatile bool flash_safe_ready = false;
 
 // ---------------------------------------------------------------------------
@@ -100,7 +100,7 @@ static volatile bool flash_safe_ready = false;
 
 void file_manager_set_flash_safe_ready(bool ready)
 {
-    // Only Core 0 may change the Flash write permission.
+    // Менять разрешение записи во flash может только Core 0.
     if (get_core_num() != 0) {
         return;
     }
@@ -131,41 +131,34 @@ static bool flash_write_allowed(void)
 // ---------------------------------------------------------------------------  
 // Multicore-safe Flash helpers  
 //  
-// ---------------------------------------------------------------------------  
- 
-// Голые flash-операции: IRQ off + erase/program. БЕЗ парковки —  
-// вызывать только когда Core 1 уже припаркован (внутри park-окна)  
-// или из обёрток do_flash_erase/do_flash_program ниже.  
-  
-// Обёртки с парковкой — для одиночных вызовов (log_append, log_file_clear).  
+// Два уровня:  
+//   *_locked — голые операции: IRQ off + erase/program, БЕЗ парковки.  
+//              Вызывать только когда Core 1 уже припаркован (park-окно).  
+//   do_flash_* — обёртки с парковкой Core 1 через core_sync.  
+//              Для одиночных вызовов (log_append, log_file_clear).  
+//   save_state() паркует Core 1 ОДИН раз на весь цикл erase + 128 program  
+//   и вызывает *_locked напрямую.  
+//  
+// Парковка через core_sync останавливает DMA-захват (rx_capture_stop)  
+// до ACK и перезапускает его (rx_capture_start) после unpark —  
+// flash-операции не идут под живым ADC+DMA-потоком.  
+// --------------------------------------------------------------------------- 
 
 // Forward-декларации locked-операций (определения ниже).  
 static bool __not_in_flash_func(do_flash_erase_locked)(uint32_t offset, size_t size);  
 static bool __not_in_flash_func(do_flash_program_locked)(uint32_t offset, const uint8_t* data, size_t size);
   
 static bool __not_in_flash_func(do_flash_erase)(uint32_t offset, size_t size) {  
-    Serial.printf("[FE] park req off=%lu\n", (unsigned long)offset);  
-    if (!core_sync_park_core1(0)) {  
-        Serial.printf("[FE] park FAIL\n");  
-        return false;  
-    }  
-    Serial.printf("[FE] parked, erasing\n");  
+    if (!core_sync_park_core1(0)) { return false; }  
     bool ok = do_flash_erase_locked(offset, size);
-    Serial.printf("[FE] erase done, unpark\n");  
     core_sync_unpark_core1();  
-    Serial.printf("[FE] exit ok=%d\n", (int)ok);  
     return ok;  
 }  
   
 static bool __not_in_flash_func(do_flash_program)(uint32_t offset, const uint8_t *data, size_t size) {  
-    Serial.printf("[FP] park req off=%lu\n", (unsigned long)offset);  
-    if (!core_sync_park_core1(0)) {  
-        Serial.printf("[FP] park FAIL\n");  
-        return false;  
-    }  
+    if (!core_sync_park_core1(0)) { return false; }  
     bool ok = do_flash_program_locked(offset, data, size);
     core_sync_unpark_core1();  
-    Serial.printf("[FP] done\n");  
     return ok;  
 }
 
@@ -173,14 +166,13 @@ static bool safe_flash_erase(uint32_t offset, size_t size) {
     if (!flash_write_allowed()) return false;  
     if (size == 0 ||  
         (offset % FLASH_SECTOR_SIZE) != 0 ||  
-        (size % FLASH_SECTOR_SIZE) != 0) {  
-        Serial.println("[FM] ERROR: invalid Flash erase alignment");  
-        return false;  
-    }
+        (size % FLASH_SECTOR_SIZE) != 0) { return false; }
     return do_flash_erase(offset, size);
 }  
   
 static bool safe_flash_program(uint32_t offset, const uint8_t* data, size_t size) {  
+    if (!flash_write_allowed()) return false;  
+    if (data == nullptr || size == 0) return false;  
     if ((offset % FLASH_PAGE_SIZE) != 0) return false;  
     if ((size % FLASH_PAGE_SIZE) != 0) return false;  
     return do_flash_program(offset, data, size);  
@@ -210,7 +202,7 @@ static bool __not_in_flash_func(do_flash_program_locked)(uint32_t offset, const 
 
 // ---------------------------------------------------------------------------
 // CRC32
-// Polynomial 0xEDB88320, compatible with zlib.
+// Полином 0xEDB88320, совместим с zlib.
 // ---------------------------------------------------------------------------
 
 static uint32_t crc32_update(
@@ -253,9 +245,9 @@ int32_t msc_read_cb(uint32_t lba, void* buffer, uint32_t bufsize)
         if (off + bufsize > DISK_SIZE_BYTES) return -1;  
         memcpy(buffer, &ram_disk_buffer[off], bufsize);  
     } else {  
-        // XIP-ветка — единственное опасное место, печатаем её  
-        Serial.printf("[MR] XIP lba=%lu busy=%d\n",  
-                      (unsigned long)lba, (int)flash_busy);  
+        // XIP-ветка: чтение LOG.TXT напрямую из flash.  
+        // Во время erase/program XIP недоступен — отдаём нули,  
+        // Windows перечитает сектор позже.  
   
         if (flash_busy) {  
             memset(buffer, 0, bufsize);  
@@ -273,30 +265,16 @@ int32_t msc_read_cb(uint32_t lba, void* buffer, uint32_t bufsize)
     return (int32_t)bufsize;  
 }
 
-int32_t msc_write_cb(
-    uint32_t lba,
-    uint8_t* buffer,
-    uint32_t bufsize)
-{
-    Serial.printf("[MW] lba=%lu\n", (unsigned long)lba);  
+int32_t msc_write_cb(uint32_t lba, uint8_t* buffer, uint32_t bufsize) {
+    if (buffer == nullptr || bufsize == 0 || bufsize > SECTOR_SIZE ||
+        lba >= SECTOR_COUNT) { return -1; }
 
-    if (buffer == nullptr ||
-        bufsize == 0 ||
-        bufsize > SECTOR_SIZE ||
-        lba >= SECTOR_COUNT) {
-        return -1;
-    }
-
-    // LOG.TXT is read-only through USB MSC.
-    if (lba >= RAM_SECTORS) {
-        return (int32_t)bufsize;
-    }
+    // LOG.TXT через USB MSC доступен только на чтение
+    if (lba >= RAM_SECTORS) { return (int32_t)bufsize; }
 
     const uint32_t off = lba * SECTOR_SIZE;
 
-    if (off + bufsize > DISK_SIZE_BYTES) {
-        return -1;
-    }
+    if (off + bufsize > DISK_SIZE_BYTES) { return -1;  }
 
     memcpy(&ram_disk_buffer[off], buffer, bufsize);
 
@@ -304,28 +282,18 @@ int32_t msc_write_cb(
 
     pc_activity_detected = true;
 
-    // Region flags:
-    // 0x01 — boot sector / FAT / root directory
-    // 0x02 — INFO.TXT
-    // 0x04 — CONFIG.TXT
+    // Флаги регионов:  
+    // 0x01 — загрузочный сектор / FAT / корневой каталог  
+    // 0x02 — INFO.TXT  
+    // 0x04 — CONFIG.TXT  
     // 0x08 — SET.TXT
 
-    if (lba < INFO_LBA) {
-        pc_written_regions |= 0x01;
-    }
-    else if (lba < CONFIG_LBA) {
-        pc_written_regions |= 0x02;
-    }
-    else if (lba < SET_LBA) {
-        pc_written_regions |= 0x04;
-    }
-    else {
-        pc_written_regions |= 0x08;
-    }
+    if (lba < INFO_LBA)         { pc_written_regions |= 0x01; }
+    else if (lba < CONFIG_LBA)  { pc_written_regions |= 0x02; }
+    else if (lba < SET_LBA)     { pc_written_regions |= 0x04; }
+    else                        { pc_written_regions |= 0x08; }
 
-    if (lba >= INFO_LBA) {
-        pc_file_written = true;
-    }
+    if (lba >= INFO_LBA) { pc_file_written = true; }
 
     return (int32_t)bufsize;
 }
@@ -460,28 +428,14 @@ static uint32_t slot_crc_flash(const uint8_t* base)
 // Save state ring
 // ---------------------------------------------------------------------------
 
-void save_state(void)      
-{      
-    dbg_c0_stage = 55;      
-    Serial.printf("[SS] enter\n");    
+void save_state(void) {      
+    if (!flash_write_allowed()) { return; }      
     
-    if (!flash_write_allowed()) {      
-        Serial.printf("[SS] not allowed\n");    
-        dbg_c0_stage = 0;      
-        return;      
-    }      
+    if (trx_state() != TRX_RX)  { return; }      
     
-    if (trx_state() != TRX_RX) {      
-        Serial.printf("[SS] not RX\n");    
-        dbg_c0_stage = 0;      
-        return;      
-    }      
+    int32_t next_slot = (current_active_slot + 1) % SLOTS;      
     
-    int32_t next_slot =      
-        (current_active_slot + 1) % SLOTS;      
-    
-    uint32_t next_seq =      
-        current_max_seq + 1;      
+    uint32_t next_seq = current_max_seq + 1;      
     
     if (current_active_slot == -1) {      
         next_slot = 0;      
@@ -497,9 +451,6 @@ void save_state(void)
     meta.crc32 = 0;      
     meta.log_write_ptr = log_write_ptr;      
     
-    Serial.printf("[SS] meta built slot=%ld seq=%lu\n",    
-        (long)next_slot, (unsigned long)next_seq);    
-    
     uint32_t crc = 0xFFFFFFFFu;      
     uint32_t off = 0;      
     
@@ -509,11 +460,7 @@ void save_state(void)
         const uint8_t* src =      
             slot_src(off, &avail);      
     
-        if (avail == 0 || off + avail > SLOT_META_OFF) {      
-            Serial.println("[FM] ERROR: invalid slot source range");      
-            dbg_c0_stage = 0;      
-            return;      
-        }      
+        if (avail == 0 || off + avail > SLOT_META_OFF) { return; }      
     
         if (src != nullptr) {      
             crc = crc32_update(crc, src, avail);      
@@ -552,20 +499,12 @@ void save_state(void)
     
     meta.crc32 = ~crc;      
     
-    Serial.printf("[SS] crc done\n");    
-    
     const uint32_t target =      
         RING_OFFSET +      
         (uint32_t)next_slot * SLOT_SIZE;      
     
     // --- одна парковка на весь цикл erase + 128 program ---    
-    Serial.printf("[SS] park req\n");    
-    if (!core_sync_park_core1(0)) {    
-        Serial.printf("[SS] park FAIL\n");    
-        dbg_c0_stage = 0;    
-        return;    
-    }    
-    Serial.printf("[SS] parked, erase+program\n");    
+    if (!core_sync_park_core1(0)) { return; }    
     
     bool ok = do_flash_erase_locked(target, SLOT_SIZE);    
     
@@ -630,28 +569,15 @@ void save_state(void)
         off += chunk;      
     }      
     
-    Serial.printf("[SS] ops done ok=%d, unpark\n", (int)ok);    
     core_sync_unpark_core1();    
     
-    if (!ok) {    
-        dbg_c0_stage = 0;    
-        return;    
-    }    
-    
-    Serial.printf("[SS] programmed, flush\n");    
+    if (!ok) { return; }    
     
     flash_flush_cache();      
     
     current_active_slot = next_slot;      
     current_max_seq = next_seq;      
-    
-    Serial.printf(      
-        "[FM] save_state: slot=%ld seq=%lu\n",      
-        (long)next_slot,      
-        (unsigned long)next_seq      
-    );      
-    
-    dbg_c0_stage = 0;      
+     
 }
 
 // ---------------------------------------------------------------------------
@@ -700,7 +626,7 @@ bool load_state(void)
             (uint32_t)best * SLOT_SIZE
         );
 
-    // Restore complete RAM disk image.
+    // Восстановить полный образ RAM-диска
     memcpy(ram_disk_buffer, base, DISK_SIZE_BYTES);
 
     const SlotMeta* m =
@@ -1031,7 +957,7 @@ void read_and_parse_INFO_txt(void)
 
 void read_and_parse_CONFIG_txt(void)
 {
-    // Reserved for future CONFIG.TXT tags.
+    // Зарезервировано под будущие теги CONFIG.TXT
 }
 
 // ---------------------------------------------------------------------------
@@ -1102,7 +1028,7 @@ void read_and_parse_SET_txt(void)
         }
     }
 
-    // TODO: scan table [SCAN].
+    // TODO: таблица сканирования [SCAN]
 }
 
 // ---------------------------------------------------------------------------
@@ -1122,13 +1048,13 @@ void print_current_settings(void)
 }
 
 // ---------------------------------------------------------------------------
-// LOG.TXT recovery
-//
-// LOG is programmed in 256-byte pages.
-// Each page is programmed as a complete page, with unused bytes = 0xFF.
-//
-// Recovery scans page boundaries and finds the first fully erased page.
-// This is consistent with the existing append/wrap implementation.
+// Восстановление LOG.TXT  
+//  
+// LOG пишется страницами по 256 байт.  
+// Каждая страница программируется целиком, неиспользованные байты = 0xFF.  
+//  
+// Восстановление сканирует границы страниц и находит первую  
+// полностью стёртую — согласовано с логикой append/wrap.
 // ---------------------------------------------------------------------------
 
 static bool log_page_is_erased(const uint8_t* page)
@@ -1165,8 +1091,8 @@ static void log_boot_recover_ptr(void)
         }
     }
 
-    // All pages are programmed. The next append wraps to page zero,
-    // where the first sector will be erased before programming.
+    // Все страницы запрограммированы. Следующий append завернётся  
+    // на нулевую страницу, где первый сектор будет стёрт перед записью
     log_write_ptr = 0;
 
     Serial.println("[FM] LOG recovery: ring full, next ptr=0");
@@ -1178,8 +1104,8 @@ static void log_boot_recover_ptr(void)
 
 void log_append(const uint8_t* data, uint32_t len)
 {
-    // Flash writes are deliberately disabled until Core 1 Flash safety
-    // initialization has been completed and explicitly enabled.
+    // Записи во flash намеренно запрещены, пока не завершена  
+    // инициализация flash-безопасности Core 1 и не выдано разрешение
     if (!flash_write_allowed()) {
         return;
     }
@@ -1199,7 +1125,7 @@ void log_append(const uint8_t* data, uint32_t len)
             log_write_ptr = 0;
         }
 
-        // Erase the sector immediately before its first page is written.
+        // Стираем сектор непосредственно перед записью его первой страницы
         if ((log_write_ptr % FLASH_SECTOR_SIZE) == 0) {
             if (!safe_flash_erase(
                     LOG_FLASH_OFFSET + log_write_ptr,
@@ -1241,7 +1167,7 @@ void log_append(const uint8_t* data, uint32_t len)
 
     flash_flush_cache();
 
-    // USB MSC operations are kept on Core 0.
+    // Операции USB MSC выполняются только на Core 0
     remount_usb_disk();
 }
 
@@ -1294,7 +1220,7 @@ void log_file_clear(void)
 
 void remount_usb_disk(void)
 {
-    // TinyUSB MSC API must only be called from Core 0.
+    // API TinyUSB MSC вызывать только с Core 0
     if (get_core_num() != 0) {
         return;
     }
@@ -1311,8 +1237,8 @@ void remount_usb_disk(void)
 }
 
 // ---------------------------------------------------------------------------
-// File manager preparation
-// USB is NOT registered here.
+// Подготовка файлового менеджера  
+// USB здесь НЕ регистрируется
 // ---------------------------------------------------------------------------
 
 void file_manager_prepare(void)
@@ -1324,7 +1250,7 @@ void file_manager_prepare(void)
 
     Serial.println("[FM] prepare: restoring filesystem");
 
-    // Restore the most recent RAM disk image first.
+    // Сначала восстанавливаем последний образ RAM-диска
     const bool state_loaded = load_state();
 
     if (!state_loaded ||
@@ -1338,11 +1264,11 @@ void file_manager_prepare(void)
         create_default_fat_with_info_file();
     }
 
-    // Recover LOG pointer from actual Flash page contents.
-    // This intentionally overrides the possibly stale state-ring copy.
+    // Восстанавливаем указатель LOG по реальному содержимому flash-страниц
+    // Это намеренно перекрывает возможно устаревшую копию из state-ring
     log_boot_recover_ptr();
 
-    // Load configuration.
+    // Загружаем конфигурацию
     read_and_parse_INFO_txt();
     read_and_parse_CONFIG_txt();
     read_and_parse_SET_txt();
@@ -1369,7 +1295,7 @@ void init_usb_msc_interface(void)
         return;
     }
 
-    // RAM disk must be ready before MSC registration.
+    // RAM-диск должен быть готов до регистрации MSC
     file_manager_prepare();
 
     Serial.println("[MSC] registering");
@@ -1429,8 +1355,8 @@ void check_and_handle_pc_changes(void)
         Serial.println("[FM] ERROR: core1 park timeout");    
     }  
   
-    // This function performs Flash operations and MSC operations.  
-    // It must be called from Core 0 only.  
+    // Функция выполняет flash- и MSC-операции
+    // Вызывать только с Core 0
     if (get_core_num() != 0) {  
         return;  
     }  
@@ -1444,10 +1370,10 @@ void check_and_handle_pc_changes(void)
             return;    
         }    
     
-        save_state();          // внутри — dbg_c0_stage = 55  
+        save_state();
   
-        // save_state() may return without writing if Flash safety  
-        // is not enabled. Keep the pending flag in that case.  
+        // save_state() может выйти без записи, если flash-безопасность  
+        // не включена. В этом случае флаг pending сохраняем
         if (current_active_slot < 0 ||  
             current_max_seq == 0) {  
             return;  
@@ -1493,7 +1419,7 @@ void check_and_handle_pc_changes(void)
     const uint8_t regions = pc_written_regions;    
     
     Serial.printf("[FM] PC write: regions=0x%02X\n", (unsigned)regions);    
-    save_state();              // внутри — dbg_c0_stage = 55  
+    save_state();
     
     pc_activity_detected = false;    
     pc_written_regions = 0;  
