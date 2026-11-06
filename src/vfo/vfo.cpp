@@ -61,7 +61,7 @@ static void quad_fill_cfg(void) {
   s_quad_cfg.sm                 = -1;          // автовыбор свободной SM  
   s_quad_cfg.pin_i              = PIN_QUAD_I;  // 0 (Q = GP1)  
   s_quad_cfg.xosc_hz            = vfo_xosc_hz();  
-  s_quad_cfg.clk_sys_min_hz     = 180000000ULL;   // RX_CLK_SYS_MIN_HZ  
+  s_quad_cfg.clk_sys_min_hz     = 120000000ULL;   // RX_CLK_SYS_MIN_HZ  
   s_quad_cfg.clk_sys_max_hz     = (vfo_max_clk_sys_hz < 420000000UL)  
                                 ? (uint64_t)vfo_max_clk_sys_hz : 420000000ULL;  
   s_quad_cfg.pll_vco_max_hz     = (vfo_max_pll_vco_hz < 4300000000ULL)  
