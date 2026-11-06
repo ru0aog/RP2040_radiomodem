@@ -241,7 +241,6 @@ void loop() {
 // SETUP1 — Core 1  
 // ============================================================================  
 void setup1() {
-  multicore_lockout_victim_init();   // Core 1 — жертва SDK-локаута для flash_safe_execute
  
   while (!core0_ready) tight_loop_contents();  
 
@@ -251,6 +250,7 @@ void setup1() {
   vfo_on_trx_switch(TRX_RX, 3602000);    
     
   core1_pll_done = true;             // Core 0 выходит из ожидания
+  multicore_lockout_victim_init();   // Core 1 — жертва SDK-локаута для flash_safe_execute
   
   delay(100);                        // старт SM
   vfo_quad_debug();                  // [LODBG] clkdiv/enabled/lo_hz    
