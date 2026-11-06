@@ -1,5 +1,6 @@
 .pio/
 .vscode/
 *.zip
+*.rar
 *.tar.gz
 firmware.map

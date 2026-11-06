@@ -137,29 +137,11 @@ static bool flash_write_allowed(void)
 // вызывать только когда Core 1 уже припаркован (внутри park-окна)  
 // или из обёрток do_flash_erase/do_flash_program ниже.  
   
-static bool __not_in_flash_func(flash_erase_locked)(uint32_t offset, size_t size) {  
-    flash_busy = true;  
-    __dmb();  
-    uint32_t ints = save_and_disable_interrupts();  
-    flash_range_erase(offset, size);  
-    restore_interrupts(ints);  
-    flash_busy = false;  
-    __dmb();  
-    return true;  
-}  
-  
-static bool __not_in_flash_func(flash_program_locked)(uint32_t offset, const uint8_t *data, size_t size) {  
-    flash_busy = true;  
-    __dmb();  
-    uint32_t ints = save_and_disable_interrupts();  
-    flash_range_program(offset, data, size);  
-    restore_interrupts(ints);  
-    flash_busy = false;  
-    __dmb();  
-    return true;  
-}  
-  
 // Обёртки с парковкой — для одиночных вызовов (log_append, log_file_clear).  
+
+// Forward-декларации locked-операций (определения ниже).  
+static bool __not_in_flash_func(do_flash_erase_locked)(uint32_t offset, size_t size);  
+static bool __not_in_flash_func(do_flash_program_locked)(uint32_t offset, const uint8_t* data, size_t size);
   
 static bool __not_in_flash_func(do_flash_erase)(uint32_t offset, size_t size) {  
     Serial.printf("[FE] park req off=%lu\n", (unsigned long)offset);  
@@ -168,7 +150,7 @@ static bool __not_in_flash_func(do_flash_erase)(uint32_t offset, size_t size) {
         return false;  
     }  
     Serial.printf("[FE] parked, erasing\n");  
-    bool ok = flash_erase_locked(offset, size);  
+    bool ok = do_flash_erase_locked(offset, size);
     Serial.printf("[FE] erase done, unpark\n");  
     core_sync_unpark_core1();  
     Serial.printf("[FE] exit ok=%d\n", (int)ok);  
@@ -181,7 +163,7 @@ static bool __not_in_flash_func(do_flash_program)(uint32_t offset, const uint8_t
         Serial.printf("[FP] park FAIL\n");  
         return false;  
     }  
-    bool ok = flash_program_locked(offset, data, size);  
+    bool ok = do_flash_program_locked(offset, data, size);
     core_sync_unpark_core1();  
     Serial.printf("[FP] done\n");  
     return ok;  
@@ -199,15 +181,9 @@ static bool safe_flash_erase(uint32_t offset, size_t size) {
 }  
   
 static bool safe_flash_program(uint32_t offset, const uint8_t* data, size_t size) {  
-    if (!flash_write_allowed()) return false;  
-    if (data == nullptr || size == 0 ||  
-        (offset % FLASH_PAGE_SIZE) != 0 ||  
-        (size % FLASH_PAGE_SIZE) != 0) {  
-        Serial.println("[FM] ERROR: invalid Flash program alignment");  
-        return false;  
-    }  
-    do_flash_program(offset, data, size);  
-    return true;  
+    if ((offset % FLASH_PAGE_SIZE) != 0) return false;  
+    if ((size % FLASH_PAGE_SIZE) != 0) return false;  
+    return do_flash_program(offset, data, size);  
 }
 
 static bool __not_in_flash_func(do_flash_erase_locked)(uint32_t offset, size_t size) {  
@@ -1484,12 +1460,10 @@ void check_and_handle_pc_changes(void)
             String(current_max_seq) +    
             " ===\r\n";  
   
-        dbg_c0_stage = 56;     // log_append — тоже flash-путь  
         log_append(  
             reinterpret_cast<const uint8_t*>(hdr.c_str()),  
             (uint32_t)hdr.length()  
         );  
-        dbg_c0_stage = 0;  
   
         remount_usb_disk();  
     }  
