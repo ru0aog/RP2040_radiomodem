@@ -4,11 +4,12 @@
 // PLL настраивается своим кодом, без pll_init() SDK (тот ждёт LOCK бесконечно).  
 // clk_sys переключается напрямую через регистры, без clock_configure.  
 //  
-// Парковка Core 0 на время смены clk_sys обязательна.  
-//   Core 1: флаг-протокол с номером поколения (core0_park_*, trx_control.cpp).  
-//   Core 0: rp2040.idleOtherCore() — запасной путь.  
-// Внутри окон и МЕЖДУ ними нет Serial: печатаем только после всех окон.  
+// Парковка на время смены clk_sys обязательна — через core_sync  
+// (единственный владелец протокола): с Core 1 — core_sync_park_core0(),  
+// с Core 0 — core_sync_park_core1(). Путь idleOtherCore() удалён.  
+// Serial печатает только с Core 0 (QP_LOG) и только вне окон.
 #include "quad_vfo_pll.h"  
+#include "../../trx/core_sync.h"
 #include "hardware/clocks.h"  
 #include "hardware/pll.h"  
 #include "hardware/sync.h"  
@@ -17,31 +18,19 @@
 #include "hardware/structs/clocks.h"  
 #include "hardware/structs/ssi.h"  
 #include "hardware/structs/pll.h"  
-#include "hardware/regs/pll.h"  
+#include "hardware/regs/pll.h"
 #include <stdio.h>  
-  
-#define QUAD_LOCK_TIMEOUT   20000u  
-#define PARK_TIMEOUT_US     1000000u  
-#define FLASH_SAFE_MAX_HZ   48000000u  
-// Запасной счётный таймаут парковки — time_us_32() может встать  
-// при перестройке часов, и ограниченное ожидание станет вечным.  
-#define PARK_SPIN_LIMIT     4000000u
-  
-extern volatile uint32_t core0_park_req;  
-extern volatile uint32_t core0_park_ack;  
-extern volatile uint32_t core0_park_inside;  
-extern volatile uint32_t core0_park_enter;  
-extern volatile uint32_t core0_park_exit;  
-extern volatile uint32_t core0_loop_seen;  
-  
-volatile uint32_t quad_vfo_pll_dbg_stage = 0;  
-  
-static uint32_t s_clk_sys_hz = 133000000;  
-static uint32_t s_park_gen   = 0;  
-static bool     s_park_timeout = false;   // печатаем после окон  
-  
-static bool s_pll_quiet = false;  
-#define QP_LOG(...)  do { if (!s_pll_quiet) Serial.printf(__VA_ARGS__); } while (0)  
+
+#define QUAD_LOCK_TIMEOUT   20000u
+#define FLASH_SAFE_MAX_HZ   48000000u
+volatile uint32_t quad_vfo_pll_dbg_stage = 0;
+static uint32_t s_clk_sys_hz = 133000000;
+
+static bool s_pll_quiet = false;
+
+// USB-стек живёт на Core 0 — с Core 1 не печатаем вообще.  
+#define QP_LOG(...)  do { if (!s_pll_quiet && get_core_num() == 0) \
+                            Serial.printf(__VA_ARGS__); } while (0)
 void quad_vfo_pll_set_quiet(bool on) { s_pll_quiet = on; }  
   
 uint32_t quad_vfo_clk_sys_hz(void) { return s_clk_sys_hz; }  
@@ -57,63 +46,7 @@ uint32_t quad_vfo_vsel_for(uint64_t clk_hz) {
   else if (clk_hz > 133000000ULL)  return VREG_VOLTAGE_1_15;  
   return VREG_VOLTAGE_DEFAULT;  
 }  
-  
-// ---------------------------------------------------------------------------  
-// Парковка  
-// ---------------------------------------------------------------------------  
-static inline bool use_flag_park(void) { return get_core_num() == 1; }  
-  
-static bool __not_in_flash_func(park_core0)(bool flag_mode) {  
-  if (!flag_mode) { rp2040.idleOtherCore(); return true; }  
-  
-  uint32_t t0 = time_us_32();  
-  uint32_t spins = PARK_SPIN_LIMIT;        // запасной потолок без таймера  
-  // 1. Дождаться выхода Core 0 из прошлого окна.  
-  while (core0_park_inside) {  
-    if ((time_us_32() - t0 > PARK_TIMEOUT_US) || --spins == 0) {  
-      s_park_timeout = true; return false;  
-    }  
-  }
-  // 2. Новое поколение (0 зарезервирован).  
-  if (++s_park_gen == 0) s_park_gen = 1;  
-  uint32_t gen = s_park_gen;  
-  __dmb();  
-  core0_park_req = gen;  
-  __dmb();  
-  __sev();  
-  // 3. Ждать подтверждения именно этого поколения.  
-  spins = PARK_SPIN_LIMIT;  
-  while (core0_park_ack != gen) {  
-    if ((time_us_32() - t0 > PARK_TIMEOUT_US) || --spins == 0) {  
-      core0_park_req = 0;  
-      __dmb();  
-      __sev();  
-      s_park_timeout = true;  
-      return false;  
-    }  
-  }
-  return true;  
-}  
-  
-static void __not_in_flash_func(unpark_core0)(bool flag_mode) {  
-  if (!flag_mode) { rp2040.resumeOtherCore(); return; }  
-  core0_park_req = 0;  
-  __dmb();  
-  __sev();  
-}  
-  
-static void dump_park_timeout(void) {  
-  if (!s_park_timeout) return;  
-  s_park_timeout = false;  
-  Serial.printf("[PLL] PARK TIMEOUT gen=%lu req=%lu ack=%lu inside=%lu "  
-                "enter=%lu exit=%lu loop=%lu stage=%lu\n",  
-                (unsigned long)s_park_gen, (unsigned long)core0_park_req,  
-                (unsigned long)core0_park_ack, (unsigned long)core0_park_inside,  
-                (unsigned long)core0_park_enter, (unsigned long)core0_park_exit,  
-                (unsigned long)core0_loop_seen,  
-                (unsigned long)quad_vfo_pll_dbg_stage);  
-}  
-  
+
 // ---------------------------------------------------------------------------  
 // Регистровые хелперы — только RAM, без SDK  
 // ---------------------------------------------------------------------------  
@@ -184,44 +117,45 @@ static bool __not_in_flash_func(pll_setup_bounded)(uint32_t refdiv, uint32_t fbd
   return true;  
 }  
   
-// Три окна: XOSC -> PLL setup -> mux на PLL. 0 = ок, 1/2/3 = отказ парковки  
-// в этом сегменте, 10 = нет LOCK (шина на XOSC).  
-static int __not_in_flash_func(switch_sequence)(const quad_vfo_pll_t *c,  
-                                                uint32_t hz, bool fm) {  
-  uint32_t ints;  
+// Три окна: XOSC -> PLL setup -> mux на PLL. 0 = ок, 1/2/3 = отказ парковки    
+// в этом сегменте, 10 = нет LOCK (шина на XOSC), 11/13 = mux не подтвердил.    
+// Между окнами второе ядро ОСВОБОЖДАЕТСЯ — парковка только на окно.    
+static int __not_in_flash_func(switch_sequence)(const quad_vfo_pll_t *c,    
+                                                uint32_t hz) {    
+  const bool c1 = (get_core_num() == 1);  
+  uint32_t ints;    
   
-  if (!park_core0(fm)) return 1;  
-  quad_vfo_pll_dbg_stage = 1;  
-  ints = save_and_disable_interrupts();  
-  bool mux_ok = clk_sys_to_xosc();  
-  restore_interrupts(ints);  
-  unpark_core0(fm);  
-  if (!mux_ok) return 11;            // clk_ref не подтвердил selected
+  if (c1 ? !core_sync_park_core0(0) : !core_sync_park_core1(0)) return 1;    
+  quad_vfo_pll_dbg_stage = 1;    
+  ints = save_and_disable_interrupts();    
+  bool mux_ok = clk_sys_to_xosc();    
+  restore_interrupts(ints);    
+  if (c1) core_sync_unpark_core0(); else core_sync_unpark_core1();    
+  if (!mux_ok) return 11;            // mux на XOSC не подтвердил selected
   
-  if (!park_core0(fm)) return 2;  
-  quad_vfo_pll_dbg_stage = 2;  
-  ints = save_and_disable_interrupts();  
-  bool ok = pll_setup_bounded(c->refdiv, c->fbdiv, c->p1, c->p2);  
-  restore_interrupts(ints);  
-  unpark_core0(fm);  
-  if (!ok) return 10;  
+  if (c1 ? !core_sync_park_core0(0) : !core_sync_park_core1(0)) return 2;    
+  quad_vfo_pll_dbg_stage = 2;    
+  ints = save_and_disable_interrupts();    
+  bool ok = pll_setup_bounded(c->refdiv, c->fbdiv, c->p1, c->p2);    
+  restore_interrupts(ints);    
+  if (c1) core_sync_unpark_core0(); else core_sync_unpark_core1();    
+  if (!ok) return 10;    
   
-if (!park_core0(fm)) return 3;  
-  quad_vfo_pll_dbg_stage = 3;  
-  ints = save_and_disable_interrupts();  
-  ssi_set_baud_for(hz);              // ДО подъёма частоты  
-  quad_vfo_pll_dbg_stage = 4;  
-  bool pll_mux_ok = clk_sys_to_pll();  
-  restore_interrupts(ints);  
-  unpark_core0(fm);  
-  if (!pll_mux_ok) return 13;        // aux/PLL не подтвердил selected  
-  quad_vfo_pll_dbg_stage = 5;  
-  return 0;
-}  
+  if (c1 ? !core_sync_park_core0(0) : !core_sync_park_core1(0)) return 3;    
+  quad_vfo_pll_dbg_stage = 3;    
+  ints = save_and_disable_interrupts();    
+  ssi_set_baud_for(hz);              // ДО подъёма частоты    
+  quad_vfo_pll_dbg_stage = 4;    
+  bool pll_mux_ok = clk_sys_to_pll();    
+  restore_interrupts(ints);    
+  if (c1) core_sync_unpark_core0(); else core_sync_unpark_core1();    
+  if (!pll_mux_ok) return 13;        // aux/PLL не подтвердил selected    
+  quad_vfo_pll_dbg_stage = 5;    
+  return 0;  
+}
   
-static bool rollback_nominal(const quad_vfo_pll_t *nominal, uint64_t xosc_hz) {  
-  int r = switch_sequence(nominal, nominal->clk_sys_hz, use_flag_park());  
-  dump_park_timeout();  
+static bool rollback_nominal(const quad_vfo_pll_t *nominal, uint64_t xosc_hz) {    
+  int r = switch_sequence(nominal, nominal->clk_sys_hz);
   bool ok = (r == 0);  
   s_clk_sys_hz = ok ? nominal->clk_sys_hz : (uint32_t)xosc_hz;  
   if (!ok) QP_LOG("[QUAD] rollback: r=%d — шина может быть на XOSC!\n", r);  
@@ -231,30 +165,31 @@ static bool rollback_nominal(const quad_vfo_pll_t *nominal, uint64_t xosc_hz) {
 bool quad_vfo_set_clk_sys(const quad_vfo_pll_t *cfg_in, uint32_t vsel,  
                           const quad_vfo_pll_t *nominal, uint64_t xosc_hz,  
                           bool *out_nominal_ok) {  
-  if (out_nominal_ok) *out_nominal_ok = false;  
-  if (!cfg_in || !nominal || xosc_hz == 0) return false;  
+  if (out_nominal_ok) *out_nominal_ok = false;    
+  if (!cfg_in || !nominal || xosc_hz == 0) return false;    
+  // Неблокирующий захват: параллельный вход — контролируемый отказ.  
+  if (!core_sync_pll_try_lock()) return false;
   
   quad_vfo_pll_t cfg = *cfg_in;  
   if (cfg.refdiv == 0) cfg.refdiv = 1;  
   if (cfg.p1 < 2) cfg = *nominal;  
   if (cfg.p1 < 2 || cfg.p2 < 1 || cfg.refdiv < 1 ||  
       cfg.fbdiv < 16 || cfg.fbdiv > 320 || cfg.clk_sys_hz == 0) {  
-    bool rb = rollback_nominal(nominal, xosc_hz);  
-    if (out_nominal_ok) *out_nominal_ok = rb;  
-    return false;  
-  }  
+    bool rb = rollback_nominal(nominal, xosc_hz);    
+    if (out_nominal_ok) *out_nominal_ok = rb;    
+    core_sync_pll_unlock();
+    return false;    
+  }
   
   uint32_t target_clk_hz = (uint32_t)(((uint64_t)cfg.fbdiv * xosc_hz) /  
                            ((uint64_t)cfg.refdiv * cfg.p1 * cfg.p2));  
   // Реальную частоту меряем — кэш s_clk_sys_hz рассинхронизирован  
   // с soft_tx_set_clk_sys() (у того свой кэш current_clk_sys_hz).  
-  uint32_t cur_hz = meas_clk_sys_hz();  
-  bool is_oc = (target_clk_hz > cur_hz); 
-  bool fm    = use_flag_park();  
+  uint32_t cur_hz = meas_clk_sys_hz();    
+  bool is_oc = (target_clk_hz > cur_hz);   
   
-  Serial.printf("[PLL] dbg: entry target=%lu oc=%d flag=%d\n",  
-                (unsigned long)target_clk_hz, (int)is_oc, (int)fm);  
-  Serial.flush();                    // последний flush ДО окон  
+  QP_LOG("[PLL] dbg: entry target=%lu oc=%d\n",    
+         (unsigned long)target_clk_hz, (int)is_oc);
   
   // Поднимаем VREG, если переход вверх ИЛИ цель выше номинала 133 МГц —  
   // тогда запас по напряжению нужен в любом случае.  
@@ -265,10 +200,9 @@ bool quad_vfo_set_clk_sys(const quad_vfo_pll_t *cfg_in, uint32_t vsel,
   detach_peri();
   quad_vfo_pll_dbg_stage = 0;  
   
-  int r = switch_sequence(&cfg, target_clk_hz, fm);  
-  dump_park_timeout();  
-  Serial.printf("[PLL] dbg: seq r=%d stage=%lu\n", r,  
-                (unsigned long)quad_vfo_pll_dbg_stage);  
+  int r = switch_sequence(&cfg, target_clk_hz);    
+  QP_LOG("[PLL] dbg: seq r=%d stage=%lu\n", r,    
+         (unsigned long)quad_vfo_pll_dbg_stage);
   
   bool     locked_ok = false;  
   uint32_t meas_hz   = 0;  
@@ -285,22 +219,23 @@ bool quad_vfo_set_clk_sys(const quad_vfo_pll_t *cfg_in, uint32_t vsel,
         locked_ok = true;  
         break;  
       }  
-      r = switch_sequence(&cfg, target_clk_hz, fm);  
-      dump_park_timeout();  
+      r = switch_sequence(&cfg, target_clk_hz);
       if (r != 0) break;  
     }  
   }  
   
-  if (!locked_ok) {  
-    Serial.println("[PLL] dbg: no lock -> rollback");  
-    bool rb = rollback_nominal(nominal, xosc_hz);  
-    if (out_nominal_ok) *out_nominal_ok = rb;  
-    if (!is_oc) { busy_wait_us(100); vreg_set_voltage((vreg_voltage)vsel); }  
-    return false;  
-  }  
+  if (!locked_ok) {    
+    QP_LOG("[PLL] dbg: no lock -> rollback\n");    
+    bool rb = rollback_nominal(nominal, xosc_hz);    
+    if (out_nominal_ok) *out_nominal_ok = rb;    
+    if (!is_oc) { busy_wait_us(100); vreg_set_voltage((vreg_voltage)vsel); }    
+    core_sync_pll_unlock();
+    return false;    
+  }    
   
-  if (!is_oc) { busy_wait_us(100); vreg_set_voltage((vreg_voltage)vsel); }  
-  Serial.printf("[PLL] dbg: done meas=%lu\n", (unsigned long)meas_hz);  
-  s_clk_sys_hz = meas_hz;  
-  return true;  
+  if (!is_oc) { busy_wait_us(100); vreg_set_voltage((vreg_voltage)vsel); }    
+  QP_LOG("[PLL] dbg: done meas=%lu\n", (unsigned long)meas_hz);    
+  s_clk_sys_hz = meas_hz;    
+  core_sync_pll_unlock();
+  return true;    
 }

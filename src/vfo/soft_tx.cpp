@@ -20,7 +20,8 @@
 #include "vfo.h"  
 #include "../pins.h"  
 #include "../mem/mem_arena.h"  
-#include "../trx/trx_control.h"  
+#include "../trx/trx_control.h"
+#include "../trx/core_sync.h"
 #include "hardware/pio.h"  
 #include "hardware/clocks.h"  
 #include "hardware/pll.h"  
@@ -141,7 +142,32 @@ static void __not_in_flash_func(detach_peripheral_clock)(void) {
 //  LOCK-таймаут, SSI BAUDR, верификация frequency_count_khz с 3 ретраями,  
 //  откат на pll_nominal при провале)  
 // ============================================================================  
+  
+static bool __not_in_flash_func(soft_tx_set_clk_sys_locked)(const PllConfig& cfg_in,  
+                                                          uint32_t vsel);  
+  
+// Парковка второго ядра на ВСЮ перестройку (основное окно + ретраи + откат):  
+// внутри clock_configure/pll_init — XIP-код SDK, второе ядро не должно  
+// исполнять XIP во время смены clk_sys и записи ssi_hw->baudr.  
 bool __not_in_flash_func(soft_tx_set_clk_sys)(const PllConfig& cfg_in, uint32_t vsel) {  
+  if (!core_sync_pll_try_lock()) return false;
+  
+  const bool c1 = (get_core_num() == 1);  
+  bool parked = c1 ? core_sync_park_core0(0) : core_sync_park_core1(0);  
+  if (!parked) {  
+    core_sync_pll_unlock();
+    return false;  
+  }  
+  
+  bool ok = soft_tx_set_clk_sys_locked(cfg_in, vsel);  
+  
+  if (c1) core_sync_unpark_core0(); else core_sync_unpark_core1();  
+  core_sync_pll_unlock();
+  return ok;  
+}  
+  
+static bool __not_in_flash_func(soft_tx_set_clk_sys_locked)(const PllConfig& cfg_in,  
+                                                          uint32_t vsel) {
   PllConfig cfg = cfg_in;  
   if (cfg.refdiv == 0) cfg.refdiv = 1;  
   

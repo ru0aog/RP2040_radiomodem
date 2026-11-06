@@ -48,5 +48,11 @@ struct core_sync_stats {
     uint32_t park1_timeouts;  
     uint32_t park_releases;  
     uint32_t park_reentrant;  
-};  
+}; 
+
+// Аппаратный спинлок для PLL-перестроек (общий для quad_vfo и soft_tx).  
+// Неблокирующий захват: false = занято, контролируемый отказ.  
+bool core_sync_pll_try_lock(void);  
+void core_sync_pll_unlock(void);
+
 void core_sync_get_stats(core_sync_stats *out);

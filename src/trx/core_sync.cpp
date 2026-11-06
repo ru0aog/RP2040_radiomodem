@@ -39,13 +39,27 @@ volatile bool core1_park_timed_out = false;
 static uint32_t        s_park0_gen = 0;  
 static core_sync_stats s_stats;  
   
+static spin_lock_t *s_pll_lock = NULL;  
+static volatile uint32_t s_pll_lock_irq = 0;   // saved_irq для spin_unlock
+  
 void core_sync_init(void) {  
-    core0_park_req = core0_park_ack = core0_park_inside = 0;  
-    core1_park_req = core1_parked = core1_in_loop = false;  
-    s_park0_gen = 0;  
+    if (get_core_num() != 0) return;  
+    s_pll_lock = spin_lock_instance(spin_lock_claim_unused(true));  
     memset(&s_stats, 0, sizeof(s_stats));  
     __dmb();  
 }  
+  
+bool core_sync_pll_try_lock(void) {  
+    if (!s_pll_lock) return false;  
+    uint32_t irq = spin_try_lock_unsafe(s_pll_lock);  
+    if (irq == PICO_ERROR_TIMEOUT) return false;  
+    s_pll_lock_irq = irq;  
+    return true;  
+}  
+  
+void core_sync_pll_unlock(void) {  
+    if (s_pll_lock) spin_unlock(s_pll_lock, s_pll_lock_irq);  
+}
   
 // ============================================================================  
 // CORE 0 — обслуживание  
