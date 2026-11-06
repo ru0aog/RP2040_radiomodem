@@ -1,7 +1,6 @@
 // CAT-интерфейс модема (Kenwood TS-2000 subset)
-// Порт из RP2040_receiver/src/cat/fldigi_cat.cpp; retune через vfo_on_trx_switch.  
+ 
 #include "cat.h"  
-#include "../vfo/vfo.h"  
 #include "../trx/trx_control.h"  
 #include "../rx/rx_dsp.h"  
 #include "../rx/rx_usb_audio.h"
@@ -57,17 +56,22 @@ static void cat_reply_err(void) { cat_send("?;"); }
 static const uint16_t SL_TABLE[12] = {0,50,100,200,300,400,500,600,700,800,900,1000};  
 static const uint16_t SH_TABLE[12] = {1400,1600,1800,2000,2200,2400,2600,2800,3000,3400,4000,5000};  
   
-static void cat_retune(uint32_t hz) {  
-    if (hz == s_rx_hz) { cat_reply_fa(); return; }  // та же частота — без перезахвата  
-    s_rx_hz = hz;  
-    quad_vfo_set_quiet(true);          // глушим [QUAD]/[PLL] логи сканера  
-    vfo_on_trx_switch(TRX_RX, hz);  
-    quad_vfo_set_quiet(false);  
-    rx_dsp_start(hz);  
-    cat_reply_fa();                    // echo ответа (Hamlib ждёт)  
-    // Выбросить накопившийся ввод: хост мог слать повторы во время перестройки  
-    while (Serial.available() > 0) { Serial.read(); }  
-    cat_len = 0;  
+static void cat_retune(uint32_t hz) {      
+    if (hz == s_rx_hz) { cat_reply_fa(); return; }  // та же частота — без перезахвата      
+    quad_vfo_set_quiet(true);          // глушим [QUAD]/[PLL] логи сканера      
+    // Через FSM: VFO-hook исполняется на Core 1      
+    // в trx_poll_core1() — без обхода trx_control и без гонки с rx_dsp_poll.      
+    bool ok = trx_switch(TRX_RX, hz);      
+    quad_vfo_set_quiet(false);      
+    if (ok) {  
+        s_rx_hz = hz;                  // зеркало — только при успехе  
+        cat_reply_fa();                // echo ответа (Hamlib ждёт)      
+    } else {  
+        cat_reply_err();               // "?;" — честный отказ вместо ложного FA  
+    }  
+    // Выбросить накопившийся ввод: хост мог слать повторы во время перестройки      
+    while (Serial.available() > 0) { Serial.read(); }      
+    cat_len = 0;      
 }
   
 static void cat_execute(const char* cmd) {  
