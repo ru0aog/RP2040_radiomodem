@@ -23,7 +23,8 @@
 
 #include "file_manager.h"
 #include "../trx/trx_control.h"
-#include "../trx/core_sync.h"  
+#include "../trx/core_sync.h"
+#include "../vfo/quad_vfo/quad_vfo.h"
 
 #include <Adafruit_TinyUSB.h>
 
@@ -183,30 +184,62 @@ static bool safe_flash_program(uint32_t offset, const uint8_t* data, size_t size
     return do_flash_program(offset, data, size);  
 }
 
-static bool __not_in_flash_func(do_flash_erase_locked)(uint32_t offset, size_t size) {  
+static bool __not_in_flash_func(do_flash_erase_locked)(uint32_t offset, uint32_t size) {  
+    if (!core_sync_park_core0()) {  
+        Serial.println("[FM] park timeout (erase)");  
+        return false;  
+    }  
+  
     flash_busy = true;  
     __dmb();  
+  
+    const uint64_t oc_hz = quad_vfo_clk_sys_hz();  
     uint32_t ints = save_and_disable_interrupts();  
-    quad_vfo_clk_to_nominal_locked(&pll_nominal_cfg);   // шина -> 133 МГц  
-    flash_range_erase(offset, size);  
-    quad_vfo_clk_restore_locked(&pll_oc_cfg, pll_oc_hz); // шина -> разгон  
+    if (!quad_vfo_clk_to_nominal_locked(quad_vfo_nominal_pll())) {  
+        restore_interrupts(ints);  
+        flash_busy = false;  
+        __dmb();  
+        core_sync_unpark_core0();  
+        return false;  
+    }  
+    flash_range_erase(offset, size);              // внутри окна — НИКАКИХ printf  
+    quad_vfo_clk_restore_locked(quad_vfo_active_pll(), oc_hz);  
     restore_interrupts(ints);  
+  
     flash_busy = false;  
     __dmb();  
+  
+    core_sync_unpark_core0();  
     return true;  
 }
   
-static bool __not_in_flash_func(do_flash_program_locked)(uint32_t offset, const uint8_t* data, size_t size) {    
-    flash_busy = true;    
-    __dmb();    
-    uint32_t ints = save_and_disable_interrupts();    
-    quad_vfo_clk_to_nominal_locked(&pll_nominal_cfg);    // шина -> 133 МГц    
-    flash_range_program(offset, data, size);           // внутри окна — НИКАКИХ printf    
-    quad_vfo_clk_restore_locked(&pll_oc_cfg, pll_oc_hz); // шина -> разгон    
+static bool __not_in_flash_func(do_flash_program_locked)(uint32_t offset, const uint8_t* data, uint32_t size) {  
+    if (!core_sync_park_core0()) {  
+        Serial.println("[FM] park timeout (program)");  
+        return false;  
+    }  
+  
+    flash_busy = true;  
+    __dmb();  
+  
+    const uint64_t oc_hz = quad_vfo_clk_sys_hz();  
+    uint32_t ints = save_and_disable_interrupts();  
+    if (!quad_vfo_clk_to_nominal_locked(quad_vfo_nominal_pll())) {  
+        restore_interrupts(ints);  
+        flash_busy = false;  
+        __dmb();  
+        core_sync_unpark_core0();  
+        return false;  
+    }  
+    flash_range_program(offset, data, size);      // внутри окна — НИКАКИХ printf  
+    quad_vfo_clk_restore_locked(quad_vfo_active_pll(), oc_hz);  
     restore_interrupts(ints);  
-    flash_busy = false;    
-    __dmb();    
-    return true;    
+  
+    flash_busy = false;  
+    __dmb();  
+  
+    core_sync_unpark_core0();  
+    return true;  
 }
 
 // ---------------------------------------------------------------------------

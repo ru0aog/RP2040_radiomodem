@@ -646,3 +646,6 @@ void quad_vfo_debug(void) {
                 (unsigned long long)vco_hz,  
                 s_pll_nominal_used ? "(nominal fallback)" : "(target)");
 }
+
+const quad_vfo_pll_t* quad_vfo_nominal_pll(void) { return &s_cfg.pll_nominal; }  
+const quad_vfo_pll_t* quad_vfo_active_pll(void)  { return &s_active_pll; }

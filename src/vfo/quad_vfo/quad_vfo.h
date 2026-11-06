@@ -96,6 +96,9 @@ uint8_t  quad_vfo_pll_p2(void);
 bool     quad_vfo_pll_nominal(void);  
 uint64_t quad_vfo_pll_vco_hz(void);
 
+const quad_vfo_pll_t* quad_vfo_nominal_pll(void);  
+const quad_vfo_pll_t* quad_vfo_active_pll(void);
+
 // Диагностика в Serial.  
 void quad_vfo_debug(void);  
   
