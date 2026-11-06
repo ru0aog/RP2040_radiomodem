@@ -112,6 +112,7 @@ volatile uint32_t dbg_c0_stage = 0;   // 1=cat 2=txjob 3=dec 4=rsid 5=fm 6=usbau
 // ============================================================================  
 // LOOP — Core 0  
 // ============================================================================  
+/*
 void loop() {  
   core_sync_poll();           // ПЕРВОЙ строкой — обслуживание парковки Core 0
 
@@ -214,7 +215,7 @@ void loop() {
   
   // --- sync: каждые 500 мс (диагностика зависания) ---  
   static uint32_t t_sync = 0;  
-  if (millis() - t_sync > 150) {  
+  if (millis() - t_sync > 1000) {  
     t_sync = millis();  
     core_sync_stats st;  
     core_sync_get_stats(&st);  
@@ -231,6 +232,13 @@ void loop() {
                   (unsigned long)dbg_poll_out);  
   }  
 
+}
+*/
+void loop() {  
+  core_sync_poll();  
+  digitalWrite(LED_BUILTIN, (millis() >> 8) & 1);  
+  // всё остальное закомментировать: cat_poll, tx_job_poll,  
+  // rx_decoders_poll, rsid_poll, check_and_handle_pc_changes, usb_audio_poll  
 }
   
 // ============================================================================  
@@ -264,7 +272,7 @@ void loop1() {
   if (trx_state() == TRX_RX) {    
     dbg_c1_stage = 3;  
     ++dbg_poll_in;    
-    rx_dsp_poll();    
+    //rx_dsp_poll();    
     ++dbg_poll_out;    
   } else {    
     dbg_c1_stage = 4;  

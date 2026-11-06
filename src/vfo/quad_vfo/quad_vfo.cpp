@@ -124,7 +124,7 @@ void quad_vfo_default_cfg(quad_vfo_cfg_t *cfg) {
 
   cfg->pll_nominal = { 133, 6, 2, 133000000u,
                        (uint32_t)VREG_VOLTAGE_DEFAULT, false, 1 };
-  cfg->pll_ceiling = { 95, 3, 1, 380000000u,
+  cfg->pll_ceiling = { 95, 3, 1, 134000000u,
                        (uint32_t)VREG_VOLTAGE_1_30, true, 1 };
 
   cfg->xosc_hz = 12000000ULL;
