@@ -77,7 +77,9 @@ static inline uint64_t vfo_effective_pll_max(void) {
 // Профили тактирования {fbdiv, p1, p2, clk_sys_hz, vsel, is_oc, refdiv}  
 PllConfig pll_nominal   = { 133, 6, 2, 133000000ULL, (uint32_t)VREG_VOLTAGE_DEFAULT, false, 1 };  
 PllConfig pll_overclock = {  69, 3, 2, 138004025ULL, (uint32_t)VREG_VOLTAGE_DEFAULT, false, 1 };  
-PllConfig pll_ceiling   = {  95, 3, 1, 350000000ULL, (uint32_t)VREG_VOLTAGE_1_30,    true,  1 };  
+// VCO = 12 МГц * 100 = 1200 МГц, /4/1 = 300 МГц
+PllConfig pll_ceiling   = { 100, 4, 1, 300000000ULL, (uint32_t)VREG_VOLTAGE_1_30, true, 1 };  
+
   
 volatile bool clk_boosted    = false;  
 volatile bool vfo_auto_boost = false;  
