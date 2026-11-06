@@ -78,7 +78,7 @@ static void quad_eng_init(void) {
   
 static void quad_eng_start(uint32_t rx_freq_hz) {  
   // Передаём частоту ПРИЁМА — ПЧ вычитает библиотека (cfg.if_shift_hz).  
-  if (!s_quad_ready) return;  
+  if (!s_quad_ready) { Serial.println("[VFO] quad engine NOT ready — init отказ"); return; }
   if (!quad_vfo_start(rx_freq_hz))  
     Serial.printf("[VFO] quad_vfo_start(%lu) отказ\n", (unsigned long)rx_freq_hz);  
 }  
