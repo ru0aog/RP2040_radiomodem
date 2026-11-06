@@ -77,10 +77,9 @@ static inline uint64_t vfo_effective_pll_max(void) {
 // Профили тактирования {fbdiv, p1, p2, clk_sys_hz, vsel, is_oc, refdiv}  
 PllConfig pll_nominal   = { 133, 6, 2, 133000000ULL, (uint32_t)VREG_VOLTAGE_DEFAULT, false, 1 };  
 PllConfig pll_overclock = {  69, 3, 2, 138004025ULL, (uint32_t)VREG_VOLTAGE_DEFAULT, false, 1 };  
-// Разгон ОТКЛЮЧЁН: потолок = номинал, сканер выберет 133 МГц.  
-// Плата нестабильна выше ~300 МГц под нагрузкой ADC+DMA+USB (зависания  
-// через ~40 с). Вернуться к разгону — после проверки питания/термала.  
-PllConfig pll_ceiling =   { 111, 6, 2, 133000000ULL, (uint32_t)VREG_VOLTAGE_DEFAULT, false, 1 };
+// (252 МГц):  
+PllConfig pll_ceiling = { 95, 3, 1, 380000000ULL, VREG_VOLTAGE_1_30, true, 1 };  
+// vfo_max_clk_sys_hz = 380000000
 
   
 volatile bool clk_boosted    = false;  

@@ -200,7 +200,7 @@ static void __not_in_flash_func(rx_dma_irq)(void) {
 // Запуск захвата (после rx_dsp_start — NCO уже настроен)  
 // ---------------------------------------------------------------------------  
 
-void rx_capture_start(void) {
+void __not_in_flash_func(rx_capture_start)(void) {
     // DMA_IRQ_0 должен жить на Core 1 (там же DSP-поллинг очереди).  
     assert(get_core_num() == 1);
     
@@ -286,89 +286,10 @@ void rx_capture_start(void) {
 
 }
 
-/*
-void rx_capture_start(void) {    
-    assert(get_core_num() == 1);    
-    if (rx_running) return;    
-    
-    rx_q_head = 0;    
-    rx_q_tail = 0;    
-    rx_dropped = 0;    
-    rx_cap_isr_count = 0;    
-    rx_drop_scratch = 0;    
-    rx_drop_queue_full = 0;    
-    rx_drop_busy = 0;    
-    rx_irq_both_pending = 0;    
-    rx_busy_a[0] = rx_busy_a[1] = false;    
-    rx_busy_b[0] = rx_busy_b[1] = false;    
-    rx_a_sel = 0;    
-    rx_b_sel = 0;    
-    rx_dma_a_target = rx_buf_a0;    
-    rx_dma_b_target = rx_buf_b0;    
-    
-    Serial.println("[CAP] enter");    
-    Serial.printf("[CAP] clk_adc=%lu clk_sys=%lu\n",    
-                  (unsigned long)clock_get_hz(clk_adc),    
-                  (unsigned long)clock_get_hz(clk_sys));    
-    
-    adc_init();    
-    adc_gpio_init(RX_ADC_PIN_I);    
-    adc_gpio_init(RX_ADC_PIN_Q);    
-    adc_set_round_robin(0b00011);    
-    adc_fifo_setup(true, true, 1, false, false);    
-    float adc_div = 48000000.0f / (float)RX_ADC_SAMPLE_RATE_HZ - 1.0f;    
-    if (adc_div < 0.0f) adc_div = 0.0f;    
-    adc_set_clkdiv(adc_div);    
-    adc_run(false);    
-    adc_fifo_drain();    
-    adc_select_input(0);    
-    Serial.println("[CAP] adc cfg done");    
-    
-    rx_dma_a = dma_claim_unused_channel(true);    
-    rx_dma_b = dma_claim_unused_channel(true);    
-    Serial.printf("[CAP] dma ch a=%d b=%d\n", rx_dma_a, rx_dma_b);    
-    
-    dma_channel_config ca = dma_channel_get_default_config(rx_dma_a);    
-    channel_config_set_transfer_data_size(&ca, DMA_SIZE_16);    
-    channel_config_set_read_increment(&ca, false);    
-    channel_config_set_write_increment(&ca, true);    
-    channel_config_set_dreq(&ca, DREQ_ADC);    
-    channel_config_set_chain_to(&ca, rx_dma_b);    
-    dma_channel_configure(rx_dma_a, &ca, (void*)rx_buf_a0, &adc_hw->fifo,    
-                          RX_BLOCK_TRANSFERS, false);    
-    Serial.println("[CAP] ch a cfg");    
-    
-    dma_channel_config cb = dma_channel_get_default_config(rx_dma_b);    
-    channel_config_set_transfer_data_size(&cb, DMA_SIZE_16);    
-    channel_config_set_read_increment(&cb, false);    
-    channel_config_set_write_increment(&cb, true);    
-    channel_config_set_dreq(&cb, DREQ_ADC);    
-    channel_config_set_chain_to(&cb, rx_dma_a);    
-    dma_channel_configure(rx_dma_b, &cb, (void*)rx_buf_b0, &adc_hw->fifo,    
-                          RX_BLOCK_TRANSFERS, false);    
-    Serial.println("[CAP] ch b cfg");    
-    
-    dma_channel_acknowledge_irq0(rx_dma_a);    
-    dma_channel_acknowledge_irq0(rx_dma_b);    
-    dma_channel_set_irq0_enabled(rx_dma_a, true);    
-    dma_channel_set_irq0_enabled(rx_dma_b, true);    
-    irq_set_exclusive_handler(DMA_IRQ_0, rx_dma_irq);    
-    irq_set_enabled(DMA_IRQ_0, true);    
-    Serial.println("[CAP] irq on");    
-    
-    rx_running = true;    
-    dma_channel_start(rx_dma_a);    
-    Serial.println("[CAP] dma started");    
-    
-    adc_run(true);    
-    Serial.println("[CAP] adc run — exit");    
-}
-*/
-
 // ---------------------------------------------------------------------------  
-// Останов. Контракт: сначала rx_dsp_stop(), затем rx_capture_stop().  
+// Останов DMA+ADC. Вызывается из core_sync_core1_poll при парковке — rx_dsp_stop не обязателен
 // ---------------------------------------------------------------------------  
-void rx_capture_stop(void) {  
+void __not_in_flash_func(rx_capture_stop)(void) {
     rx_running = false;  
     adc_run(false);  
     irq_set_enabled(DMA_IRQ_0, false);  
