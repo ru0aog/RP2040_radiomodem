@@ -102,7 +102,11 @@ void setup() {
   
   Serial.println("[DBG] setup done");  
   Serial.flush();  
-}  
+} 
+  
+volatile uint32_t dbg_l1 = 0, dbg_poll_in = 0, dbg_poll_out = 0;  
+extern volatile uint32_t dbg_c1_stage;   // определён в trx_control.cpp (стадии 10-13)  
+// здесь пишем стадии 1-4: 1=park, 2=trx, 3=dsp, 4=vfo, 0=idle
   
 // ============================================================================  
 // LOOP — Core 0  
@@ -190,7 +194,19 @@ void loop() {
                   (unsigned long)rx_capture_dropped(),  
                   (unsigned long)rx_drop_scratch,  
                   (unsigned long)rx_drop_queue_full,  
-                  (unsigned long)rx_drop_busy);  
+                  (unsigned long)rx_drop_busy); 
+    core_sync_stats st;  
+    core_sync_get_stats(&st);  
+    Serial.printf("sync: p0 req=%lu ack=%lu to=%lu dead=%lu | "  
+                  "p1 req=%lu ack=%lu to=%lu dead=%lu | "  
+                  "c1stage=%lu l1=%lu pin=%lu pout=%lu\n",  
+                  (unsigned long)st.park0_requests, (unsigned long)st.park0_ack,  
+                  (unsigned long)st.park0_timeouts, (unsigned long)st.park0_dead_initiator,  
+                  (unsigned long)st.park1_requests, (unsigned long)st.park1_ack,  
+                  (unsigned long)st.park1_timeouts, (unsigned long)st.park1_dead_initiator,  
+                  (unsigned long)dbg_c1_stage,  
+                  (unsigned long)dbg_l1, (unsigned long)dbg_poll_in,  
+                  (unsigned long)dbg_poll_out); 
   }  
 }  
   
@@ -200,8 +216,6 @@ void loop() {
 void setup1() {  
  
   while (!core0_ready) tight_loop_contents();  
-
-  // 
 
   // Стартовый RX: VFO-hook → quad_vfo → set_clk_sys → разгон 337.5 МГц.  
   // Паркует Core 0 флаг-протоколом (Core 0 уже в while(!core1_pll_done)  
@@ -218,17 +232,20 @@ void setup1() {
   rx_capture_start();                // DMA запускаем ПОСЛЕ настройки NCO  
 }  
   
-volatile uint32_t dbg_l1 = 0, dbg_poll_in = 0, dbg_poll_out = 0;  
-  
 void loop1() {  
   ++dbg_l1;  
-  core_sync_core1_poll();     // ПЕРВОЙ строкой — обслуживание парковки Core 1
-  trx_poll_core1(); 
-  if (trx_state() == TRX_RX) {  
-    ++dbg_poll_in;  
-    rx_dsp_poll();  
-    ++dbg_poll_out;  
-  } else {  
-    vfo_poll();  
-  }  
+  dbg_c1_stage = 1;  
+  core_sync_core1_poll();  
+  dbg_c1_stage = 2;  
+  trx_poll_core1();   
+  if (trx_state() == TRX_RX) {    
+    dbg_c1_stage = 3;  
+    ++dbg_poll_in;    
+    rx_dsp_poll();    
+    ++dbg_poll_out;    
+  } else {    
+    dbg_c1_stage = 4;  
+    vfo_poll();    
+  }    
+  dbg_c1_stage = 0;  
 }

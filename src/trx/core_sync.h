@@ -47,7 +47,9 @@ struct core_sync_stats {
     uint32_t park1_ack;  
     uint32_t park1_timeouts;  
     uint32_t park_releases;  
-    uint32_t park_reentrant;  
+    uint32_t park_reentrant;
+    uint32_t park0_dead_initiator;   // Core 0 вышел из парковки по потолку  
+    uint32_t park1_dead_initiator;   // Core 1 вышел из парковки по потолку
 }; 
 
 // Аппаратный спинлок для PLL-перестроек (общий для quad_vfo и soft_tx).  
@@ -56,3 +58,5 @@ bool core_sync_pll_try_lock(void);
 void core_sync_pll_unlock(void);
 
 void core_sync_get_stats(core_sync_stats *out);
+
+

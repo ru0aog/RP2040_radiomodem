@@ -69,14 +69,20 @@ static void __not_in_flash_func(core0_wait_in_ram)(void) {
     if (gen == 0) return;  
     uint32_t ints = save_and_disable_interrupts();  // нет XIP через IRQ  
     core0_park_inside = 1;  
-    core0_park_enter++;  
     __dmb();  
-    core0_park_ack = gen;            // ACK только ПОСЛЕ входа в безопасное состояние  
+    core0_park_ack = gen;  
     __dmb();  
-    __sev();  
-    while (core0_park_req == gen) {  
-        __wfe();  
-    }  
+  
+    // Потолок ~5 с счётным циклом: если инициатор умер/завис, не держать  
+    // Core 0 вечно — выйти, посчитать, дать системе жить для диагностики.  
+    // БЕЗ __wfe: событие может не прийти (инициатор мёртв) — тогда ядро    
+    // уснёт навсегда и потолок не сработает. Busy-poll на время окна.    
+    for (uint32_t spin = 0; core0_park_req == gen; ) {    
+        if (++spin > 20000000u) {    
+            s_stats.park0_dead_initiator++;    
+            break;    
+        }    
+    }
     core0_park_exit++;  
     __dmb();  
     core0_park_inside = 0;  
@@ -101,8 +107,14 @@ void __not_in_flash_func(core_sync_core1_poll)(void) {
     uint32_t ints = save_and_disable_interrupts();  
     core1_parked = true;  
     __dmb();  
-    __sev();  
-    while (core1_park_req) { __wfe(); }  
+    __sev();
+    uint32_t spin = 0;  
+    while (core1_park_req) {    
+        if (++spin > 20000000u) {    
+            s_stats.park1_dead_initiator++;    
+            break;    
+        }    
+    }
     core1_parked = false;  
     __dmb();  
     __sev();  

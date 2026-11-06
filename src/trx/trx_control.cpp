@@ -40,6 +40,7 @@ static volatile uint32_t s_pending_freq = 0;
 static volatile bool     s_req_active   = false;    
 static volatile bool     s_req_done     = false;    
 static volatile uint32_t s_cur_freq     = 0;   // частота, реально стоящая в тракте
+volatile uint32_t dbg_c1_stage = 0;   // диагностика: этап перехода на Core 1
   
 extern "C" {    
 __attribute__((weak)) void rx_pipeline_stop(void)              {}    
@@ -60,38 +61,43 @@ void trx_init(TrxVfoHook vfo_hook) {
 // ============================================================================  
 // CORE 1  
 // ============================================================================  
-void trx_poll_core1(void) {  
-  if (!s_req_active) return;  
-  
-  uint32_t ints = save_and_disable_interrupts();    
-  TrxState target = s_pending;    
-  uint32_t freq   = s_pending_freq;    
-  restore_interrupts(ints);
-  
-  s_state = TRX_SWITCHING;  
-  __dmb();  
-  
-  rx_pipeline_stop();  
-  tx_pipeline_stop();  
-  
-  mem_arena_switch(target == TRX_TX ? MEM_PHASE_TX : MEM_PHASE_RX);  
-  
-  if (s_vfo) s_vfo(target, freq);   // внутри — парковка Core 0 через core_sync
-  
-  if (target == TRX_TX) {    
-    tx_pipeline_start();    
-  } else {    
-    rx_pipeline_set_freq(freq);    // запрос из trx_switch — единственный источник    
-    rx_pipeline_start();    
-  }
-  
-  s_state    = target;    
-  s_cur_freq = freq;    
+void trx_poll_core1(void) {    
+  if (!s_req_active) return;    
+    
+  uint32_t ints = save_and_disable_interrupts();      
+  TrxState target = s_pending;      
+  uint32_t freq   = s_pending_freq;      
+  restore_interrupts(ints);  
+    
+  dbg_c1_stage = 10;               // переход принят  
+  s_state = TRX_SWITCHING;    
   __dmb();    
-  s_req_done = true;
-  __dmb();  
-  s_req_active = false;  
-}  
+    
+  rx_pipeline_stop();    
+  tx_pipeline_stop();    
+    
+  dbg_c1_stage = 11;               // mem_arena_switch  
+  mem_arena_switch(target == TRX_TX ? MEM_PHASE_TX : MEM_PHASE_RX);    
+    
+  dbg_c1_stage = 12;               // VFO hook (PLL-скан, парковка Core 0)  
+  if (s_vfo) s_vfo(target, freq);   // внутри — парковка Core 0 через core_sync  
+    
+  dbg_c1_stage = 13;               // start тракта  
+  if (target == TRX_TX) {      
+    tx_pipeline_start();      
+  } else {      
+    rx_pipeline_set_freq(freq);    // запрос из trx_switch — единственный источник      
+    rx_pipeline_start();      
+  }  
+    
+  s_state    = target;      
+  s_cur_freq = freq;      
+  __dmb();      
+  s_req_done = true;  
+  __dmb();    
+  s_req_active = false;    
+  dbg_c1_stage = 0;                // переход завершён  
+}
   
 // ============================================================================  
 // CORE 0  
