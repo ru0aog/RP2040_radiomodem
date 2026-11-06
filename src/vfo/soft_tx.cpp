@@ -62,7 +62,7 @@
 #define VFO_RAND_SEED_INIT 0xACE1u  
   
 // Лимиты из Flash-паспорта (OCTEST). До интеграции file_manager — дефолты.  
-uint32_t vfo_max_clk_sys_hz = 133000000;  
+uint32_t vfo_max_clk_sys_hz = 220000000;  
 uint32_t vfo_max_pll_vco_hz = 1600000000;  
   
 static inline uint64_t vfo_effective_clk_max(void) {  
@@ -77,9 +77,8 @@ static inline uint64_t vfo_effective_pll_max(void) {
 // Профили тактирования {fbdiv, p1, p2, clk_sys_hz, vsel, is_oc, refdiv}  
 PllConfig pll_nominal   = { 133, 6, 2, 133000000ULL, (uint32_t)VREG_VOLTAGE_DEFAULT, false, 1 };  
 PllConfig pll_overclock = {  69, 3, 2, 138004025ULL, (uint32_t)VREG_VOLTAGE_DEFAULT, false, 1 };  
-// (252 МГц):  
-PllConfig pll_ceiling = { 95, 3, 1, 380000000ULL, VREG_VOLTAGE_1_30, true, 1 };  
-// vfo_max_clk_sys_hz = 380000000
+// (200 МГц):  
+PllConfig pll_ceiling = { 50, 1, 1, 200000000ULL, VREG_VOLTAGE_1_25, true, 1 };
 
   
 volatile bool clk_boosted    = false;  
