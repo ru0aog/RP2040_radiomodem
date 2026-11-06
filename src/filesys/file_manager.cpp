@@ -60,6 +60,7 @@ String my_demod_var   = "USB";
 bool debug_flag = false;
 
 volatile bool pc_file_written = false;
+static volatile bool flash_busy = false;
 
 int32_t  current_active_slot = -1;
 uint32_t current_max_seq = 0;
@@ -152,10 +153,14 @@ static bool __not_in_flash_func(do_flash_erase)(uint32_t offset, size_t size) {
         return false;  
     }  
   
-    dbg_c0_stage = 53;  
+    flash_busy = true;                          // msc_read_cb отдаст нули вместо XIP  
+    __dmb();  
     uint32_t ints = save_and_disable_interrupts();  
+    dbg_c0_stage = 53;  
     flash_range_erase(offset, size);  
     restore_interrupts(ints);  
+    flash_busy = false;  
+    __dmb();  
   
     dbg_c0_stage = 54;  
     if (need_xosc) fm_clk_to_pll();  
@@ -213,10 +218,14 @@ static void __not_in_flash_func(do_flash_program)(
         return;  
     }  
   
-    dbg_c0_stage = 62;  
+    flash_busy = true;  
+    __dmb();  
     uint32_t ints = save_and_disable_interrupts();  
+    dbg_c0_stage = 62;  
     flash_range_program(offset, data, size);  
     restore_interrupts(ints);  
+    flash_busy = false;  
+    __dmb();  
   
     dbg_c0_stage = 63;  
     if (need_xosc) fm_clk_to_pll();  
@@ -280,44 +289,54 @@ void msc_flush_cb(void) {
     // от Windows вечно отодвигают 1500-мс окно сохранения.  
 }
 
-int32_t msc_read_cb(
-    uint32_t lba,
-    void* buffer,
-    uint32_t bufsize)
-{
-    if (buffer == nullptr ||
-        bufsize == 0 ||
-        bufsize > SECTOR_SIZE ||
-        lba >= SECTOR_COUNT) {
-        return -1;
-    }
-
-    if (lba < RAM_SECTORS) {
-        const uint32_t off = lba * SECTOR_SIZE;
-
-        if (off + bufsize > DISK_SIZE_BYTES) {
-            return -1;
-        }
-
-        memcpy(buffer, &ram_disk_buffer[off], bufsize);
-    }
-    else {
-        const uint32_t off =
-            (lba - RAM_SECTORS) * SECTOR_SIZE;
-
-        if (off + bufsize > LOG_MAX_BYTES) {
-            return -1;
-        }
-
-        const uint8_t* flash_data =
-            reinterpret_cast<const uint8_t*>(
-                XIP_BASE + LOG_FLASH_OFFSET + off
-            );
-
-        memcpy(buffer, flash_data, bufsize);
-    }
-
-    return (int32_t)bufsize;
+// src/filesys/file_manager.cpp  
+int32_t msc_read_cb(  
+    uint32_t lba,  
+    void* buffer,  
+    uint32_t bufsize)  
+{  
+    if (buffer == nullptr ||  
+        bufsize == 0 ||  
+        bufsize > SECTOR_SIZE ||  
+        lba >= SECTOR_COUNT) {  
+        return -1;  
+    }  
+  
+    if (lba < RAM_SECTORS) {  
+        const uint32_t off = lba * SECTOR_SIZE;  
+  
+        if (off + bufsize > DISK_SIZE_BYTES) {  
+            return -1;  
+        }  
+  
+        memcpy(buffer, &ram_disk_buffer[off], bufsize);  
+    }  
+    else {  
+        // Защита от XIP-доступа во время flash-операции:  
+        // колбэк вызывается из USB-стека на Core 0; если в этот момент  
+        // идёт erase/program (flash_busy), чтение LOG.TXT из XIP уронит ядро.  
+        // Отдаём нули — Windows перечитает сектор позже.  
+        if (flash_busy) {  
+            memset(buffer, 0, bufsize);  
+            return (int32_t)bufsize;  
+        }  
+  
+        const uint32_t off =  
+            (lba - RAM_SECTORS) * SECTOR_SIZE;  
+  
+        if (off + bufsize > LOG_MAX_BYTES) {  
+            return -1;  
+        }  
+  
+        const uint8_t* flash_data =  
+            reinterpret_cast<const uint8_t*>(  
+                XIP_BASE + LOG_FLASH_OFFSET + off  
+            );  
+  
+        memcpy(buffer, flash_data, bufsize);  
+    }  
+  
+    return (int32_t)bufsize;  
 }
 
 int32_t msc_write_cb(
@@ -1384,6 +1403,7 @@ void file_manager_prepare(void)
 // USB MSC registration
 // ---------------------------------------------------------------------------
 
+
 void init_usb_msc_interface(void)
 {
     if (usb_started) {
@@ -1412,6 +1432,7 @@ void init_usb_msc_interface(void)
         (unsigned)SECTOR_SIZE
     );
 }
+
 
 // ---------------------------------------------------------------------------
 // Backward-compatible initialization
