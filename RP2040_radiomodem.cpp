@@ -31,12 +31,11 @@
 #include "src/trx/tx_job.h"
   
 // ============================================================================  
-// Флаг-протокол парковки Core 0 (объекты в src/trx/trx_control.cpp).  
-// Core 1 запрашивает уход Core 0 в RAM-цикл на время переключения clk_sys.  
-// Обслуживаем запросы в while(!core1_pll_done) и в trx_switch-ожидании.  
+// Межъядерная парковка — единственный владелец протокола: src/trx/core_sync.  
+// Core 0 обслуживает core_sync_poll() в loop(), while(!core1_pll_done)  
+// и внутри trx_switch(); Core 1 — core_sync_core1_poll() в loop1().  
 // ============================================================================  
-extern volatile uint32_t core0_park_req;  
-extern void core0_park_poll(void);           // НЕ static в trx_control.cpp  
+#include "src/trx/core_sync.h"
   
 // ============================================================================  
 // Глобальные  
@@ -86,17 +85,18 @@ void setup() {
                 (unsigned long long)vfo_xosc_hz());  
   Serial.flush();  
   
-  core0_ready = true;                        // запуск loop1() на Core 1  
+  core_sync_init();                          // ДО запуска Core 1  
+  core0_ready = true;                        // запуск loop1() на Core 1
   
   // Ждём окончания PLL-окна quad-движка (Core 1, setup1).  
   // ОБЯЗАТЕЛЬНО: обслуживаем park-протокол — Core 1 вызывает  
   // set_clk_sys с флаг-парковкой; без poll() парк уйдёт в PARK TIMEOUT.  
   // В этой точке на Core 0 — пустой цикл без USB: живой TinyUSB-стек  
   // во время парковки кладёт handshake (был завис на "before park").  
-  while (!core1_pll_done) {  
-      core0_park_poll();  
-      tight_loop_contents();  
-  }  
+  while (!core1_pll_done) {    
+      core_sync_poll();    
+      tight_loop_contents();    
+  }
   file_manager_set_flash_safe_ready(true);              // ← добавить  
   Serial.println("[FM] core1 init: flash writes ENABLED");
   
@@ -108,7 +108,8 @@ void setup() {
 // LOOP — Core 0  
 // ============================================================================  
 void loop() {  
-  
+  core_sync_poll();           // ПЕРВОЙ строкой — обслуживание парковки Core 0
+
   // Маячок живости: 2 Гц. Замёрз — прошивка умерла, мигает — мёртв только вывод.  
   static uint32_t t_blink = 0;  
   static bool     led = false;  
@@ -221,7 +222,7 @@ volatile uint32_t dbg_l1 = 0, dbg_poll_in = 0, dbg_poll_out = 0;
   
 void loop1() {  
   ++dbg_l1;  
-  core1_park_poll();          // ПЕРВОЙ строкой — обслуживание парковки  
+  core_sync_core1_poll();     // ПЕРВОЙ строкой — обслуживание парковки Core 1
   trx_poll_core1(); 
   if (trx_state() == TRX_RX) {  
     ++dbg_poll_in;  

@@ -11,56 +11,16 @@
 //   3. VFO hook (может занять сотни мс — PLL-скан clk_sys);  
 //   4. start нового тракта.  
 //  
-// Флаг-протокол парковки Core 0 (вместо rp2040.idleOtherCore):  
-//   core0_park_req    — номер поколения запроса (0 = запроса нет), пишет Core 1  
-//   core0_park_ack    — номер поколения, который Core 0 подтвердил  
-//   core0_park_inside — Core 0 находится в RAM-цикле  
-// Core 0 обслуживает запрос через core0_park_poll() во всех циклах ожидания.  
+// Парковка Core 0 — через core_sync (единственный владелец протокола).  
+// Core 0 обслуживает запрос через core_sync_poll() во всех циклах ожидания.
 // ============================================================================  
 #include "trx_control.h"  
 #include "../mem/mem_arena.h"  
 #include "pico/multicore.h"  
-#include "hardware/sync.h"  
+#include "hardware/sync.h"
+#include "core_sync.h"
   
 #define TRX_SWITCH_TIMEOUT_MS  3000  
-  
-// ---------------------------------------------------------------------------  
-// Флаг-протокол парковки (не static — читается из quad_vfo_pll.cpp и скетча)  
-// ---------------------------------------------------------------------------  
-volatile uint32_t core0_park_req    = 0;  
-volatile uint32_t core0_park_ack    = 0;  
-volatile uint32_t core0_park_inside = 0;  
-volatile uint32_t core0_park_enter  = 0;  
-volatile uint32_t core0_park_exit   = 0;  
-volatile uint32_t core0_loop_seen   = 0;  
-  
-// Целиком в RAM: во время смены clk_sys Core 0 не должен трогать XIP.  
-void __not_in_flash_func(core0_wait_in_ram)(void) {  
-  uint32_t gen = core0_park_req;  
-  if (gen == 0) return;  
-  core0_park_inside = 1;  
-  core0_park_enter++;  
-  __dmb();  
-  core0_park_ack = gen;            // подтверждаем ИМЕННО это поколение  
-  __dmb();  
-  __sev();                         // на случай, если Core 1 ждёт в wfe  
-  while (core0_park_req == gen) {  
-    __wfe();                       // будит __sev() из unpark_core0  
-  }  
-  core0_park_exit++;  
-  __dmb();  
-  core0_park_inside = 0;           // теперь Core 1 может открывать следующее окно  
-  __dmb();  
-  __sev();  
-}  
-  
-// Вызывать в каждом цикле ожидания Core 0.  
-void __not_in_flash_func(core0_park_poll)(void) {  
-  core0_loop_seen++;  
-  if (core0_park_req != 0 && core0_park_req != core0_park_ack) {  
-    core0_wait_in_ram();  
-  }  
-}  
   
 // ============================================================================  
 // СОСТОЯНИЕ  
@@ -137,12 +97,12 @@ bool trx_switch(TrxState target, uint32_t freq_hz) {
   s_pending      = target;  
   s_req_done     = false;  
   __dmb();  
-  s_req_active   = true;  
+  s_req_active   = true;
+  uint32_t t0 = millis();
   
-  uint32_t t0 = millis();  
-  while (!s_req_done) {  
-    core0_park_poll();               // парковка — ПЕРВОЙ, до millis/Serial  
-    if (core0_park_req != 0) continue;   // окно открыто — без flash-кода  
+  while (!s_req_done) {    
+    core_sync_poll();                    // парковка — ПЕРВОЙ, до millis/Serial    
+    if (core_sync_core0_park_pending()) continue;  // окно открыто — без flash-кода
     if (millis() - t0 > TRX_SWITCH_TIMEOUT_MS) {  
       Serial.printf("[TRX] switch timeout -> %s (%lu Hz), state=%d\n",  
                     target == TRX_TX ? "TX" : "RX",  

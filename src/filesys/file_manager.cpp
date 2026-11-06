@@ -10,16 +10,19 @@
 //   SlotMeta и CRC32;
 //   существующий USB MSC API.
 //
-// Flash writes:
-//   разрешены только после file_manager_set_flash_safe_ready(true);
-//   выполняются только с Core 0 через flash_safe_execute().
-//
-// ВАЖНО:
-//   Пока flash_safe_execute_core_init() не инициализирован на Core 1,
-//   file_manager_set_flash_safe_ready(true) вызывать НЕЛЬЗЯ.
+// Flash writes:  
+//   разрешены только после file_manager_set_flash_safe_ready(true);  
+//   выполняются только с Core 0, с парковкой Core 1 через core_sync  
+//   и переводом clk_sys на XOSC (fm_clk_to_xosc/fm_clk_to_pll).  
+//   flash_safe_execute() SDK НЕ используется.  
+//  
+// ВАЖНО:  
+//   file_manager_set_flash_safe_ready(true) вызывать только после  
+//   core1_pll_done — Core 1 должен обслуживать core_sync_core1_poll().
 
 #include "file_manager.h"
 #include "../trx/trx_control.h"
+#include "../trx/core_sync.h"  
 
 #include <Adafruit_TinyUSB.h>
 
@@ -75,29 +78,11 @@ volatile uint32_t last_msc_write_time = 0;
 volatile bool pc_activity_detected = false;
 volatile uint8_t pc_written_regions = 0;
 
-extern volatile uint32_t core0_park_req;  
-extern volatile uint32_t core0_park_ack;  
-extern void core0_park_poll(void);
-
-static bool __not_in_flash_func(fm_clk_to_xosc)(void);  
-static bool __not_in_flash_func(fm_clk_to_pll)(void);
-
-// Парковка Core 1 — зеркало core0_park_* из trx_control.cpp  
-volatile bool core1_park_req = false;  
-volatile bool core1_parked   = false;
-volatile bool core1_in_loop  = false;   // Core 1 дошёл до loop1()
+// Определён в core_sync.cpp — печатается из check_and_handle_pc_changes().  
+extern volatile bool core1_park_timed_out;  
   
-void __not_in_flash_func(core1_park_poll)(void) {  
-    core1_in_loop = true;  
-    if (!core1_park_req) return;
-    core1_parked = true;  
-    __dmb();  
-    __sev();  
-    while (core1_park_req) { __wfe(); }   // RAM-цикл, XIP не трогаем  
-    core1_parked = false;  
-    __dmb();  
-    __sev();  
-}
+static bool __not_in_flash_func(fm_clk_to_xosc)(void);    
+static bool __not_in_flash_func(fm_clk_to_pll)(void);
 
 // ---------------------------------------------------------------------------
 // Internal state
@@ -151,52 +136,17 @@ static bool flash_write_allowed(void)
 // Multicore-safe Flash helpers
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------  
-// Парковка Core 1 флаг-протоколом (зеркало core0_park_*).  
-// Core 1 обслуживает core1_park_poll() первой строкой loop1().  
-// ---------------------------------------------------------------------------  
-  
-static volatile bool core1_park_timed_out = false;   // печатает Core 0 из loop()  
-  
-static bool park_core1(void) {  
-    if (get_core_num() != 0) return false;  
-    if (core1_parked) return true;  
-    if (!core1_in_loop) return false;   // Core 1 ещё в setup1 — не ждём вообще  
-  
-    core1_park_req = true;  
-    __dmb();  
-    __sev();  
-  
-    const uint32_t t0 = millis();  
-    while (!core1_parked) {  
-        if ((uint32_t)(millis() - t0) > 200u) {  
-            core1_park_req = false;  
-            __dmb();  
-            __sev();  
-            core1_park_timed_out = true;   // НЕ печатаем здесь — printf может заблокировать  
-            return false;  
-        }  
-        tight_loop_contents();  
-    }  
-    return true;  
+static void __not_in_flash_func(do_flash_erase)(uint32_t offset, size_t size) {    
+    if (!core_sync_park_core1(0)) return;    
+    uint32_t ints = save_and_disable_interrupts();    
+    if (fm_clk_to_xosc()) {              // clk_sys: 373 МГц -> 12 МГц    
+        flash_range_erase(offset, size);    
+        fm_clk_to_pll();                 // обратно на PLL_SYS (VFO не тронут)    
+    }    
+    restore_interrupts(ints);    
+    flash_flush_cache();    
+    core_sync_unpark_core1();  
 }
-  
-static void unpark_core1(void) {  
-    core1_park_req = false;  
-    __dmb();  
-    __sev();  
-}  
-  
-static void __not_in_flash_func(do_flash_erase)(uint32_t offset, size_t size) {  
-    if (!park_core1()) return;  
-    uint32_t ints = save_and_disable_interrupts();  
-    fm_clk_to_xosc();                    // clk_sys: 373 МГц -> 12 МГц  
-    flash_range_erase(offset, size);  
-    fm_clk_to_pll();                     // обратно на PLL_SYS (VFO не тронут)  
-    restore_interrupts(ints);  
-    flash_flush_cache();  
-    unpark_core1();  
-}  
 
 // Перевод clk_sys на XOSC и обратно на PLL_SYS — только mux, PLL не трогаем.  
 // Вызывать ТОЛЬКО с отключёнными IRQ и припаркованным Core 1.  
@@ -233,14 +183,15 @@ static bool __not_in_flash_func(fm_clk_to_pll)(void) {
   
 static void __not_in_flash_func(do_flash_program)(  
         uint32_t offset, const uint8_t* data, size_t size) {  
-    if (!park_core1()) return;  
-    uint32_t ints = save_and_disable_interrupts();  
-    fm_clk_to_xosc();  
-    flash_range_program(offset, data, size);  
-    fm_clk_to_pll();  
-    restore_interrupts(ints);  
-    flash_flush_cache();  
-    unpark_core1();  
+    if (!core_sync_park_core1(0)) return;    
+    uint32_t ints = save_and_disable_interrupts();    
+    if (fm_clk_to_xosc()) {    
+        flash_range_program(offset, data, size);    
+        fm_clk_to_pll();    
+    }    
+    restore_interrupts(ints);    
+    flash_flush_cache();    
+    core_sync_unpark_core1();
 }
   
 static bool safe_flash_erase(uint32_t offset, size_t size) {  
@@ -250,9 +201,9 @@ static bool safe_flash_erase(uint32_t offset, size_t size) {
         (size % FLASH_SECTOR_SIZE) != 0) {  
         Serial.println("[FM] ERROR: invalid Flash erase alignment");  
         return false;  
-    }  
-    do_flash_erase(offset, size);  
-    return true;  
+    }
+    do_flash_erase(offset, size);    
+    return true;
 }  
   
 static bool safe_flash_program(uint32_t offset, const uint8_t* data, size_t size) {  
