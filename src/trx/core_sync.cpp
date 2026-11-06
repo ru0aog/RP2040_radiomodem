@@ -8,7 +8,8 @@
 // ============================================================================  
 #include "core_sync.h"  
 #include "hardware/sync.h"  
-#include "hardware/timer.h"  
+#include "hardware/timer.h"
+#include <string.h>
   
 #define PARK0_TIMEOUT_US   1000000u   // 1 с — фактическое старое значение  
 #define PARK0_SPIN_LIMIT   4000000u   // счётный потолок: таймер может встать  
@@ -154,9 +155,10 @@ bool core_sync_park_core1(uint32_t timeout_ms) {
     __sev();  
     s_stats.park1_requests++;  
   
-    const uint32_t t0 = millis();  
-    while (!core1_parked) {  
-        if ((uint32_t)(millis() - t0) > timeout_ms) {  
+    const uint32_t t0 = millis();    
+    while (!core1_parked) {    
+        core_sync_poll();   // обслуживаем встречные запросы от Core 1  
+        if ((uint32_t)(millis() - t0) > timeout_ms) {
             core1_park_req = false;  
             __dmb();  
             __sev();  
