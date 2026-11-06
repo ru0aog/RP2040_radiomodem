@@ -151,8 +151,50 @@ static bool flash_write_allowed(void)
 // --------------------------------------------------------------------------- 
 
 // Forward-декларации locked-операций (определения ниже).  
-static bool __not_in_flash_func(do_flash_erase_locked)(uint32_t offset, size_t size);  
-static bool __not_in_flash_func(do_flash_program_locked)(uint32_t offset, const uint8_t* data, size_t size);
+static bool __not_in_flash_func(do_flash_erase_locked)(uint32_t offset, uint32_t size);    
+static bool __not_in_flash_func(do_flash_program_locked)(uint32_t offset, const uint8_t* data, uint32_t size);
+
+static bool __not_in_flash_func(do_flash_erase_locked)(uint32_t offset, uint32_t size) {  
+    flash_busy = true;  
+    __dmb();  
+  
+    const uint64_t oc_hz = quad_vfo_clk_sys_hz();  
+    uint32_t ints = save_and_disable_interrupts();  
+    if (!quad_vfo_clk_to_nominal_locked(quad_vfo_nominal_pll())) {  
+        restore_interrupts(ints);  
+        flash_busy = false;  
+        __dmb();  
+        return false;  
+    }  
+    flash_range_erase(offset, size);            // внутри окна — НИКАКИХ printf  
+    quad_vfo_clk_restore_locked(quad_vfo_active_pll(), oc_hz);  
+    restore_interrupts(ints);  
+  
+    flash_busy = false;  
+    __dmb();  
+    return true;  
+}  
+  
+static bool __not_in_flash_func(do_flash_program_locked)(uint32_t offset, const uint8_t* data, uint32_t size) {  
+    flash_busy = true;  
+    __dmb();  
+  
+    const uint64_t oc_hz = quad_vfo_clk_sys_hz();  
+    uint32_t ints = save_and_disable_interrupts();  
+    if (!quad_vfo_clk_to_nominal_locked(quad_vfo_nominal_pll())) {  
+        restore_interrupts(ints);  
+        flash_busy = false;  
+        __dmb();  
+        return false;  
+    }  
+    flash_range_program(offset, data, size);    // внутри окна — НИКАКИХ printf  
+    quad_vfo_clk_restore_locked(quad_vfo_active_pll(), oc_hz);  
+    restore_interrupts(ints);  
+  
+    flash_busy = false;  
+    __dmb();  
+    return true;  
+}
   
 static bool __not_in_flash_func(do_flash_erase)(uint32_t offset, size_t size) {  
     if (!core_sync_park_core1(0)) { return false; }  
@@ -182,64 +224,6 @@ static bool safe_flash_program(uint32_t offset, const uint8_t* data, size_t size
     if ((offset % FLASH_PAGE_SIZE) != 0) return false;  
     if ((size % FLASH_PAGE_SIZE) != 0) return false;  
     return do_flash_program(offset, data, size);  
-}
-
-static bool __not_in_flash_func(do_flash_erase_locked)(uint32_t offset, uint32_t size) {  
-    if (!core_sync_park_core0(0)) {   // 0 = дефолтный таймаут 1 с
-        Serial.println("[FM] park timeout (erase)");  
-        return false;  
-    }  
-  
-    flash_busy = true;  
-    __dmb();  
-  
-    const uint64_t oc_hz = quad_vfo_clk_sys_hz();  
-    uint32_t ints = save_and_disable_interrupts();  
-    if (!quad_vfo_clk_to_nominal_locked(quad_vfo_nominal_pll())) {  
-        restore_interrupts(ints);  
-        flash_busy = false;  
-        __dmb();  
-        core_sync_unpark_core0();  
-        return false;  
-    }  
-    flash_range_erase(offset, size);              // внутри окна — НИКАКИХ printf  
-    quad_vfo_clk_restore_locked(quad_vfo_active_pll(), oc_hz);  
-    restore_interrupts(ints);  
-  
-    flash_busy = false;  
-    __dmb();  
-  
-    core_sync_unpark_core0();  
-    return true;  
-}
-  
-static bool __not_in_flash_func(do_flash_program_locked)(uint32_t offset, const uint8_t* data, uint32_t size) {  
-    if (!core_sync_park_core0(0)) {   // 0 = дефолтный таймаут 1 с
-        Serial.println("[FM] park timeout (program)");  
-        return false;  
-    }  
-  
-    flash_busy = true;  
-    __dmb();  
-  
-    const uint64_t oc_hz = quad_vfo_clk_sys_hz();  
-    uint32_t ints = save_and_disable_interrupts();  
-    if (!quad_vfo_clk_to_nominal_locked(quad_vfo_nominal_pll())) {  
-        restore_interrupts(ints);  
-        flash_busy = false;  
-        __dmb();  
-        core_sync_unpark_core0();  
-        return false;  
-    }  
-    flash_range_program(offset, data, size);      // внутри окна — НИКАКИХ printf  
-    quad_vfo_clk_restore_locked(quad_vfo_active_pll(), oc_hz);  
-    restore_interrupts(ints);  
-  
-    flash_busy = false;  
-    __dmb();  
-  
-    core_sync_unpark_core0();  
-    return true;  
 }
 
 // ---------------------------------------------------------------------------
