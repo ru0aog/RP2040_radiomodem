@@ -105,9 +105,10 @@ void setup() {
 } 
   
 volatile uint32_t dbg_l1 = 0, dbg_poll_in = 0, dbg_poll_out = 0;  
-extern volatile uint32_t dbg_c1_stage;   // определён в trx_control.cpp (стадии 10-13)  
+extern volatile uint32_t dbg_c1_stage;   // определён в trx_control.cpp (стадии 10-13)
 // здесь пишем стадии 1-4: 1=park, 2=trx, 3=dsp, 4=vfo, 0=idle
-  
+volatile uint32_t dbg_c0_stage = 0;   // 1=cat 2=txjob 3=dec 4=rsid 5=fm 6=usbaudio 0=idle
+
 // ============================================================================  
 // LOOP — Core 0  
 // ============================================================================  
@@ -165,12 +166,13 @@ void loop() {
     }  
   }  
   
-  cat_poll();                     // разбор команд с основного CDC, разделитель ';'
-  tx_job_poll();
-  rx_decoders_poll();
-  rsid_poll();                 // печать "# RSID ..." + автопереключение моды
-  check_and_handle_pc_changes();
-  usb_audio_poll();            // выкачиваем аудио-очередь rx_dsp -> UAC
+  dbg_c0_stage = 1;  cat_poll();                     // разбор команд с основного CDC, разделитель ';'  
+  dbg_c0_stage = 2;  tx_job_poll();  
+  dbg_c0_stage = 3;  rx_decoders_poll();  
+  dbg_c0_stage = 4;  rsid_poll();                 // печать "# RSID ..." + автопереключение моды  
+  dbg_c0_stage = 5;  check_and_handle_pc_changes();  
+  dbg_c0_stage = 6;  usb_audio_poll();            // выкачиваем аудио-очередь rx_dsp -> UAC  
+  dbg_c0_stage = 0;
   
   // --- Пульс-строка раз в 10 сек ---  
   static uint32_t t_stat = 0;  
@@ -208,7 +210,28 @@ void loop() {
                   (unsigned long)dbg_l1, (unsigned long)dbg_poll_in,  
                   (unsigned long)dbg_poll_out); 
   }  
-}  
+
+  
+  // --- sync: каждые 500 мс (диагностика зависания) ---  
+  static uint32_t t_sync = 0;  
+  if (millis() - t_sync > 500) {  
+    t_sync = millis();  
+    core_sync_stats st;  
+    core_sync_get_stats(&st);  
+    Serial.printf("sync: p0 req=%lu ack=%lu to=%lu dead=%lu | "  
+                  "p1 req=%lu ack=%lu to=%lu dead=%lu | "  
+                  "c0=%lu c1=%lu l1=%lu pin=%lu pout=%lu\n",  
+                  (unsigned long)st.park0_requests, (unsigned long)st.park0_ack,  
+                  (unsigned long)st.park0_timeouts, (unsigned long)st.park0_dead_initiator,  
+                  (unsigned long)st.park1_requests, (unsigned long)st.park1_ack,  
+                  (unsigned long)st.park1_timeouts, (unsigned long)st.park1_dead_initiator,  
+                  (unsigned long)dbg_c0_stage,  
+                  (unsigned long)dbg_c1_stage,  
+                  (unsigned long)dbg_l1, (unsigned long)dbg_poll_in,  
+                  (unsigned long)dbg_poll_out);  
+  }  
+
+}
   
 // ============================================================================  
 // SETUP1 — Core 1  
