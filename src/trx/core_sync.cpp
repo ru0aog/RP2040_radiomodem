@@ -7,6 +7,7 @@
 // восстанавливаются после выхода — исключён уход в XIP через прерывание.  
 // ============================================================================  
 #include "core_sync.h"  
+#include "../rx/rx_capture.h"   // rx_capture_stop/rx_capture_start
 #include "hardware/sync.h"  
 #include "hardware/timer.h"
 #include <string.h>
@@ -104,22 +105,35 @@ void __not_in_flash_func(core_sync_poll)(void) {
 void __not_in_flash_func(core_sync_core1_poll)(void) {  
     core1_in_loop = true;  
     if (!core1_park_req) return;  
+  
+    // Остановить DMA-захват ДО парковки: flash-операция на Core 0  
+    // не должна идти под живым потоком ADC->SRAM — это вешало плату.  
+    const bool cap_was_running = rx_capture_is_running();  
+    if (cap_was_running) {  
+        rx_capture_stop();  
+    }  
+  
     uint32_t ints = save_and_disable_interrupts();  
     core1_parked = true;  
     __dmb();  
-    __sev();
+    __sev();  
     uint32_t spin = 0;  
-    while (core1_park_req) {    
-        if (++spin > 20000000u) {    
-            s_stats.park1_dead_initiator++;    
-            break;    
-        }    
-    }
+    while (core1_park_req) {  
+        if (++spin > 20000000u) {  
+            s_stats.park1_dead_initiator++;  
+            break;  
+        }  
+    }  
     core1_parked = false;  
     __dmb();  
     __sev();  
     restore_interrupts(ints);  
-}  
+  
+    // Перезапуск захвата после выхода из парковки.  
+    if (cap_was_running) {  
+        rx_capture_start();  
+    }  
+}
   
 // ============================================================================  
 // Парковка Core 0 — инициатор Core 1 (логика из quad_vfo_pll.cpp)  

@@ -424,3 +424,7 @@ void rx_capture_release(void) {
 }  
   
 uint32_t rx_capture_dropped(void) { return rx_dropped; }
+
+bool rx_capture_is_running(void) {  
+    return rx_running;  
+}

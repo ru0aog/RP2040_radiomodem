@@ -8,9 +8,10 @@
 #pragma once  
 #include <Arduino.h>  
 #include "rx_dsp.h"  
-  
+
 void     rx_capture_start(void);          // запуск конвейера (после rx_dsp_start)  
 void     rx_capture_stop(void);           // останов (после rx_dsp_stop!)  
+bool     rx_capture_is_running(void);     // true, если DMA-захват активен
   
 // API очереди — вызывается ТОЛЬКО из rx_dsp_poll() на Core 1.  
 const volatile uint32_t* rx_capture_get_block(void);  

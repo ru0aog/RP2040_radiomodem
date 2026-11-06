@@ -1,0 +1,3 @@
+C:\VSCodePortable\data\.platformio\PlatformIO\Projects\261031-020328-rpipico> 
+
+Get-ChildItem -Path .\src -Recurse -File | Where-Object { $_.Extension -match '\.(cpp|h)$' } | ForEach-Object { Write-Output "=== FILE: $($_.FullName) ==="; Get-Content $_.FullName } > full_code.txt
