@@ -79,7 +79,7 @@ PllConfig pll_nominal   = { 133, 6, 2, 133000000ULL, (uint32_t)VREG_VOLTAGE_DEFA
 PllConfig pll_overclock = {  69, 3, 2, 138004025ULL, (uint32_t)VREG_VOLTAGE_DEFAULT, false, 1 };  
 PllConfig pll_ceiling = { 250, 3, 2, 250000000ULL, VREG_VOLTAGE_1_25, true, 1 };  
 // VCO = 12М × 250/3 = 1000 МГц; clk = 1000/(2×2) = 250 МГц  
-// p1=2 ≥ p2=2 — валидно для скана (p1<2 и p1<p2 отсеиваются)
+// p1=2 ≥ p2=2, VCO в [750,1600] — валидно для скана
 
   
 volatile bool clk_boosted    = false;  
