@@ -140,27 +140,14 @@ static bool flash_write_allowed(void)
 //   save_state() паркует Core 1 ОДИН раз на весь цикл erase + 128 program  
 //   и вызывает *_locked напрямую.  
 //  
-// Парковка через core_sync останавливает DMA-захват (rx_capture_stop)  
-// до ACK и перезапускает его (rx_capture_start) после unpark —  
-// flash-операции не идут под живым ADC+DMA-потоком.  
+//   Парковка через core_sync останавливает DMA-захват (rx_capture_stop)    
+//   до ACK и перезапускает его (rx_capture_start) после unpark —    
+//   flash-операции не идут под живым ADC+DMA-потоком.    
+//   На время erase/program шина откатывается на номинал 133 МГц    
+//   (quad_vfo_clk_to_nominal_locked) и возвращается на разгон после —    
+//   как vfo_clk_boost_exit/enter в маяке: boot2 и XIP работают    
+//   на штатной частоте, делитель SSI не нужно восстанавливать вручную.
 // --------------------------------------------------------------------------- 
-
-// boot2 flash_exit_xip сбрасывает ssi_hw->baudr на PICO_FLASH_SPI_CLKDIV (=2).  
-// На разогнанной шине это даёт SSI = clk_sys/2 (122 МГц при 244 МГц) —  
-// флэш не тянет, первый же XIP-fetch вешает ядро.  
-// Восстанавливаем делитель под текущий clk_sys — та же формула,  
-// что в ssi_set_baud_for (quad_vfo_pll.cpp) и soft_tx_set_clk_sys_locked.  
-static void __not_in_flash_func(ssi_restore_baud)(void) {  
-    const uint32_t FLASH_SAFE_MAX_HZ = 48000000u;  
-    uint32_t clk_hz = clock_get_hz(clk_sys);  
-    uint32_t b = (clk_hz + FLASH_SAFE_MAX_HZ - 1) / FLASH_SAFE_MAX_HZ;  
-    b = (b + 1u) & ~1u;  
-    if (b < 2u)  b = 2u;  
-    if (b > 34u) b = 34u;  
-    ssi_hw->ssienr = 0;  
-    ssi_hw->baudr  = b;  
-    ssi_hw->ssienr = 1;  
-}
 
 // Forward-декларации locked-операций (определения ниже).  
 static bool __not_in_flash_func(do_flash_erase_locked)(uint32_t offset, size_t size);  
@@ -200,24 +187,26 @@ static bool __not_in_flash_func(do_flash_erase_locked)(uint32_t offset, size_t s
     flash_busy = true;  
     __dmb();  
     uint32_t ints = save_and_disable_interrupts();  
-    flash_range_erase(offset, size);          // внутри окна — НИКАКИХ printf  
-    ssi_restore_baud();                       // boot2 сбросил baudr — вернуть под clk_sys  
-    restore_interrupts(ints);
+    quad_vfo_clk_to_nominal_locked(&pll_nominal_cfg);   // шина -> 133 МГц  
+    flash_range_erase(offset, size);  
+    quad_vfo_clk_restore_locked(&pll_oc_cfg, pll_oc_hz); // шина -> разгон  
+    restore_interrupts(ints);  
     flash_busy = false;  
     __dmb();  
     return true;  
-}  
+}
   
-static bool __not_in_flash_func(do_flash_program_locked)(uint32_t offset, const uint8_t* data, size_t size) {  
-    flash_busy = true;  
-    __dmb();  
-    uint32_t ints = save_and_disable_interrupts();  
-    flash_range_program(offset, data, size);  // внутри окна — НИКАКИХ printf  
-    ssi_restore_baud();                       // boot2 сбросил baudr — вернуть под clk_sys  
-    restore_interrupts(ints);
-    flash_busy = false;  
-    __dmb();  
-    return true;  
+static bool __not_in_flash_func(do_flash_program_locked)(uint32_t offset, const uint8_t* data, size_t size) {    
+    flash_busy = true;    
+    __dmb();    
+    uint32_t ints = save_and_disable_interrupts();    
+    quad_vfo_clk_to_nominal_locked(&pll_nominal_cfg);    // шина -> 133 МГц    
+    flash_range_program(offset, data, size);           // внутри окна — НИКАКИХ printf    
+    quad_vfo_clk_restore_locked(&pll_oc_cfg, pll_oc_hz); // шина -> разгон    
+    restore_interrupts(ints);  
+    flash_busy = false;    
+    __dmb();    
+    return true;    
 }
 
 // ---------------------------------------------------------------------------

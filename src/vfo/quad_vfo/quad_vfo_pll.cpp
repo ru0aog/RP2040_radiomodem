@@ -117,42 +117,36 @@ static bool __not_in_flash_func(pll_setup_bounded)(uint32_t refdiv, uint32_t fbd
   return true;  
 }  
   
-// Три окна: XOSC -> PLL setup -> mux на PLL. 0 = ок, 1/2/3 = отказ парковки    
-// в этом сегменте, 10 = нет LOCK (шина на XOSC), 11/13 = mux не подтвердил.    
-// Между окнами второе ядро ОСВОБОЖДАЕТСЯ — парковка только на окно.    
-static int __not_in_flash_func(switch_sequence)(const quad_vfo_pll_t *c,    
-                                                uint32_t hz) {    
+// Одно окно: паркуем второе ядро и глушим IRQ на ВСЮ последовательность  
+// XOSC -> PLL setup -> baudr -> mux на PLL. Как в маяке (380 МГц, стабильно).  
+// 0 = ок, 1 = отказ парковки, 10 = нет LOCK, 11/13 = mux не подтвердил.  
+static int __not_in_flash_func(switch_sequence)(const quad_vfo_pll_t *c,  
+                                                uint32_t hz) {  
   const bool c1 = (get_core_num() == 1);  
-  uint32_t ints;    
   
-  if (c1 ? !core_sync_park_core0(0) : !core_sync_park_core1(0)) return 1;    
-  quad_vfo_pll_dbg_stage = 1;    
-  ints = save_and_disable_interrupts();    
-  bool mux_ok = clk_sys_to_xosc();    
-  restore_interrupts(ints);    
-  if (c1) core_sync_unpark_core0(); else core_sync_unpark_core1();    
-  if (!mux_ok) return 11;            // mux на XOSC не подтвердил selected
+  if (c1 ? !core_sync_park_core0(0) : !core_sync_park_core1(0)) return 1;  
+  quad_vfo_pll_dbg_stage = 1;  
+  uint32_t ints = save_and_disable_interrupts();  
   
-  if (c1 ? !core_sync_park_core0(0) : !core_sync_park_core1(0)) return 2;    
-  quad_vfo_pll_dbg_stage = 2;    
-  ints = save_and_disable_interrupts();    
-  bool ok = pll_setup_bounded(c->refdiv, c->fbdiv, c->p1, c->p2);    
-  restore_interrupts(ints);    
-  if (c1) core_sync_unpark_core0(); else core_sync_unpark_core1();    
-  if (!ok) return 10;    
+  if (!clk_sys_to_xosc())                          { restore_interrupts(ints); goto fail11; }  
+  quad_vfo_pll_dbg_stage = 2;  
+  if (!pll_setup_bounded(c->refdiv, c->fbdiv, c->p1, c->p2)) {  
+                                                   restore_interrupts(ints); goto fail10; }  
+  quad_vfo_pll_dbg_stage = 3;  
+  ssi_set_baud_for(hz);              // ДО подъёма частоты  
+  quad_vfo_pll_dbg_stage = 4;  
+  if (!clk_sys_to_pll())                           { restore_interrupts(ints); goto fail13; }  
   
-  if (c1 ? !core_sync_park_core0(0) : !core_sync_park_core1(0)) return 3;    
-  quad_vfo_pll_dbg_stage = 3;    
-  ints = save_and_disable_interrupts();    
-  ssi_set_baud_for(hz);              // ДО подъёма частоты    
-  quad_vfo_pll_dbg_stage = 4;    
-  bool pll_mux_ok = clk_sys_to_pll();    
-  restore_interrupts(ints);    
-  if (c1) core_sync_unpark_core0(); else core_sync_unpark_core1();    
-  if (!pll_mux_ok) return 13;        // aux/PLL не подтвердил selected    
-  quad_vfo_pll_dbg_stage = 5;    
+  restore_interrupts(ints);  
+  if (c1) core_sync_unpark_core0(); else core_sync_unpark_core1();  
+  quad_vfo_pll_dbg_stage = 5;  
   return 0;  
+  
+fail11: if (c1) core_sync_unpark_core0(); else core_sync_unpark_core1(); return 11;  
+fail10: if (c1) core_sync_unpark_core0(); else core_sync_unpark_core1(); return 10;  
+fail13: if (c1) core_sync_unpark_core0(); else core_sync_unpark_core1(); return 13;  
 }
+
   
 static bool rollback_nominal(const quad_vfo_pll_t *nominal, uint64_t xosc_hz) {    
   int r = switch_sequence(nominal, nominal->clk_sys_hz);
@@ -238,4 +232,34 @@ bool quad_vfo_set_clk_sys(const quad_vfo_pll_t *cfg_in, uint32_t vsel,
   s_clk_sys_hz = meas_hz;    
   core_sync_pll_unlock();
   return true;    
+}
+
+// Откат clk_sys на номинал и обратно — ТОЛЬКО из flash-окна:  
+// второе ядро уже припарковано, IRQ выключены, XIP мёртв.  
+// Парковку НЕ делаем — она уже выполнена вызывающим.  
+static const quad_vfo_pll_t *s_flash_saved_cfg = nullptr;  
+static uint32_t s_flash_saved_hz = 0;  
+  
+bool __not_in_flash_func(quad_vfo_clk_to_nominal_locked)(const quad_vfo_pll_t *nominal) {  
+  if (!nominal) return false;  
+  s_flash_saved_hz = s_clk_sys_hz;  
+  if (!clk_sys_to_xosc()) return false;  
+  if (!pll_setup_bounded(nominal->refdiv, nominal->fbdiv,  
+                         nominal->p1, nominal->p2)) return false;  
+  ssi_set_baud_for(nominal->clk_sys_hz);  
+  if (!clk_sys_to_pll()) return false;  
+  s_clk_sys_hz = nominal->clk_sys_hz;  
+  return true;  
+}  
+  
+bool __not_in_flash_func(quad_vfo_clk_restore_locked)(const quad_vfo_pll_t *oc_cfg,  
+                                                      uint32_t oc_hz) {  
+  if (!oc_cfg || oc_hz == 0) return false;  
+  if (!clk_sys_to_xosc()) return false;  
+  if (!pll_setup_bounded(oc_cfg->refdiv, oc_cfg->fbdiv,  
+                         oc_cfg->p1, oc_cfg->p2)) return false;  
+  ssi_set_baud_for(oc_hz);  
+  if (!clk_sys_to_pll()) return false;  
+  s_clk_sys_hz = oc_hz;  
+  return true;  
 }

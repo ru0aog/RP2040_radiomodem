@@ -49,3 +49,6 @@ uint32_t quad_vfo_clk_sys_hz(void);
 uint32_t quad_vfo_clk_sys_meas_hz(void);
 
 void quad_vfo_pll_set_quiet(bool on);
+
+bool quad_vfo_clk_to_nominal_locked(const quad_vfo_pll_t *nominal);  
+bool quad_vfo_clk_restore_locked(const quad_vfo_pll_t *oc_cfg, uint32_t oc_hz);
