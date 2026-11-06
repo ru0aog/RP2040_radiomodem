@@ -275,7 +275,7 @@ void rx_capture_start(void) {
     rx_running = true;  
     irq_set_enabled(DMA_IRQ_0, true);  
   
-    // dma_channel_start(rx_dma_a);  
+    dma_channel_start(rx_dma_a);  
     adc_run(true);  
   
     Serial.printf("[CAP] chA=%d chB=%d block=%u pairs transfers=%u\n",  
