@@ -133,50 +133,58 @@ static bool flash_write_allowed(void)
 //  
 // ---------------------------------------------------------------------------  
  
+// Голые flash-операции: IRQ off + erase/program. БЕЗ парковки —  
+// вызывать только когда Core 1 уже припаркован (внутри park-окна)  
+// или из обёрток do_flash_erase/do_flash_program ниже.  
+  
+static bool __not_in_flash_func(flash_erase_locked)(uint32_t offset, size_t size) {  
+    flash_busy = true;  
+    __dmb();  
+    uint32_t ints = save_and_disable_interrupts();  
+    flash_range_erase(offset, size);  
+    restore_interrupts(ints);  
+    flash_busy = false;  
+    __dmb();  
+    return true;  
+}  
+  
+static bool __not_in_flash_func(flash_program_locked)(uint32_t offset, const uint8_t *data, size_t size) {  
+    flash_busy = true;  
+    __dmb();  
+    uint32_t ints = save_and_disable_interrupts();  
+    flash_range_program(offset, data, size);  
+    restore_interrupts(ints);  
+    flash_busy = false;  
+    __dmb();  
+    return true;  
+}  
+  
+// Обёртки с парковкой — для одиночных вызовов (log_append, log_file_clear).  
+  
 static bool __not_in_flash_func(do_flash_erase)(uint32_t offset, size_t size) {  
     Serial.printf("[FE] park req off=%lu\n", (unsigned long)offset);  
     if (!core_sync_park_core1(0)) {  
         Serial.printf("[FE] park FAIL\n");  
         return false;  
     }  
-    Serial.printf("[FE] parked, erase...\n");  
-  
-    flash_busy = true;  
-    __dmb();  
-    uint32_t ints = save_and_disable_interrupts();  
-    flash_range_erase(offset, size);          // внутри окна — НИКАКИХ printf  
-    restore_interrupts(ints);  
-    flash_busy = false;  
-    __dmb();  
-  
+    Serial.printf("[FE] parked, erasing\n");  
+    bool ok = flash_erase_locked(offset, size);  
     Serial.printf("[FE] erase done, unpark\n");  
     core_sync_unpark_core1();  
-    Serial.printf("[FE] exit ok\n");  
-    return true;  
-}
+    Serial.printf("[FE] exit ok=%d\n", (int)ok);  
+    return ok;  
+}  
   
-static bool __not_in_flash_func(do_flash_program)(uint32_t offset, const uint8_t* data, size_t size) {  
-    // Печать только на первой странице слота — 128 вызовов заспамят лог.  
-    // off%SLOT_SIZE==0 — первая страница; остальные молча.  
-    const bool trace = ((offset % SLOT_SIZE) == 0);  
-  
-    if (trace) Serial.printf("[FP] park req off=%lu\n", (unsigned long)offset);  
+static bool __not_in_flash_func(do_flash_program)(uint32_t offset, const uint8_t *data, size_t size) {  
+    Serial.printf("[FP] park req off=%lu\n", (unsigned long)offset);  
     if (!core_sync_park_core1(0)) {  
-        Serial.printf("[FP] park FAIL off=%lu\n", (unsigned long)offset);  
+        Serial.printf("[FP] park FAIL\n");  
         return false;  
     }  
-  
-    flash_busy = true;  
-    __dmb();  
-    uint32_t ints = save_and_disable_interrupts();  
-    flash_range_program(offset, data, size);  // внутри окна — НИКАКИХ printf  
-    restore_interrupts(ints);  
-    flash_busy = false;  
-    __dmb();  
-  
+    bool ok = flash_program_locked(offset, data, size);  
     core_sync_unpark_core1();  
-    if (trace) Serial.printf("[FP] page0 done\n");  
-    return true;  
+    Serial.printf("[FP] done\n");  
+    return ok;  
 }
 
 static bool safe_flash_erase(uint32_t offset, size_t size) {  
@@ -202,6 +210,27 @@ static bool safe_flash_program(uint32_t offset, const uint8_t* data, size_t size
     return true;  
 }
 
+static bool __not_in_flash_func(do_flash_erase_locked)(uint32_t offset, size_t size) {  
+    flash_busy = true;  
+    __dmb();  
+    uint32_t ints = save_and_disable_interrupts();  
+    flash_range_erase(offset, size);          // внутри окна — НИКАКИХ printf  
+    restore_interrupts(ints);  
+    flash_busy = false;  
+    __dmb();  
+    return true;  
+}  
+  
+static bool __not_in_flash_func(do_flash_program_locked)(uint32_t offset, const uint8_t* data, size_t size) {  
+    flash_busy = true;  
+    __dmb();  
+    uint32_t ints = save_and_disable_interrupts();  
+    flash_range_program(offset, data, size);  // внутри окна — НИКАКИХ printf  
+    restore_interrupts(ints);  
+    flash_busy = false;  
+    __dmb();  
+    return true;  
+}
 
 // ---------------------------------------------------------------------------
 // CRC32
@@ -455,188 +484,198 @@ static uint32_t slot_crc_flash(const uint8_t* base)
 // Save state ring
 // ---------------------------------------------------------------------------
 
-void save_state(void)    
-{    
-    dbg_c0_stage = 55;    
-    Serial.printf("[SS] enter\n");  
-  
-    if (!flash_write_allowed()) {    
-        Serial.printf("[SS] not allowed\n");  
+void save_state(void)      
+{      
+    dbg_c0_stage = 55;      
+    Serial.printf("[SS] enter\n");    
+    
+    if (!flash_write_allowed()) {      
+        Serial.printf("[SS] not allowed\n");    
+        dbg_c0_stage = 0;      
+        return;      
+    }      
+    
+    if (trx_state() != TRX_RX) {      
+        Serial.printf("[SS] not RX\n");    
+        dbg_c0_stage = 0;      
+        return;      
+    }      
+    
+    int32_t next_slot =      
+        (current_active_slot + 1) % SLOTS;      
+    
+    uint32_t next_seq =      
+        current_max_seq + 1;      
+    
+    if (current_active_slot == -1) {      
+        next_slot = 0;      
+        next_seq = 1;      
+    }      
+    
+    SlotMeta meta;      
+    
+    memset(&meta, 0xFF, sizeof(meta));      
+    
+    meta.magic = SLOT_MAGIC;      
+    meta.seq = next_seq;      
+    meta.crc32 = 0;      
+    meta.log_write_ptr = log_write_ptr;      
+    
+    Serial.printf("[SS] meta built slot=%ld seq=%lu\n",    
+        (long)next_slot, (unsigned long)next_seq);    
+    
+    uint32_t crc = 0xFFFFFFFFu;      
+    uint32_t off = 0;      
+    
+    while (off < SLOT_META_OFF) {      
+        uint32_t avail = 0;      
+    
+        const uint8_t* src =      
+            slot_src(off, &avail);      
+    
+        if (avail == 0 || off + avail > SLOT_META_OFF) {      
+            Serial.println("[FM] ERROR: invalid slot source range");      
+            dbg_c0_stage = 0;      
+            return;      
+        }      
+    
+        if (src != nullptr) {      
+            crc = crc32_update(crc, src, avail);      
+        }      
+        else {      
+            for (uint32_t n = 0; n < avail; ++n) {      
+                crc ^= 0xFF;      
+    
+                for (int b = 0; b < 8; ++b) {      
+                    crc = (crc >> 1) ^      
+                        (0xEDB88320u & (-(int32_t)(crc & 1)));      
+                }      
+            }      
+        }      
+    
+        off += avail;      
+    }      
+    
+    crc = crc32_update(      
+        crc,      
+        reinterpret_cast<const uint8_t*>(&meta),      
+        offsetof(SlotMeta, crc32)      
+    );      
+    
+    const uint8_t zeros[4] = {0, 0, 0, 0};      
+    
+    crc = crc32_update(crc, zeros, sizeof(zeros));      
+    
+    crc = crc32_update(      
+        crc,      
+        reinterpret_cast<const uint8_t*>(&meta) +      
+            offsetof(SlotMeta, crc32) + 4,      
+        sizeof(SlotMeta) -      
+            offsetof(SlotMeta, crc32) - 4      
+    );      
+    
+    meta.crc32 = ~crc;      
+    
+    Serial.printf("[SS] crc done\n");    
+    
+    const uint32_t target =      
+        RING_OFFSET +      
+        (uint32_t)next_slot * SLOT_SIZE;      
+    
+    // --- одна парковка на весь цикл erase + 128 program ---    
+    Serial.printf("[SS] park req\n");    
+    if (!core_sync_park_core1(0)) {    
+        Serial.printf("[SS] park FAIL\n");    
         dbg_c0_stage = 0;    
         return;    
     }    
-  
-    if (trx_state() != TRX_RX) {    
-        Serial.printf("[SS] not RX\n");  
+    Serial.printf("[SS] parked, erase+program\n");    
+    
+    bool ok = do_flash_erase_locked(target, SLOT_SIZE);    
+    
+    off = 0;      
+    
+    while (ok && off < SLOT_SIZE) {      
+        alignas(4) uint8_t page[FLASH_PAGE_SIZE];      
+    
+        uint32_t avail = 0;      
+    
+        const uint8_t* src =      
+            slot_src(off, &avail);      
+    
+        uint32_t chunk =      
+            avail < FLASH_PAGE_SIZE ?      
+            avail : FLASH_PAGE_SIZE;      
+    
+        if (chunk == 0 ||      
+            off + chunk > SLOT_SIZE) {      
+            Serial.println("[FM] ERROR: invalid state-slot page range");      
+            ok = false;    
+            break;      
+        }      
+    
+        if (off >= SLOT_META_OFF) {      
+            const uint32_t mo = off - SLOT_META_OFF;      
+    
+            chunk = FLASH_PAGE_SIZE;      
+    
+            memset(page, 0xFF, chunk);      
+    
+            if (mo < sizeof(SlotMeta)) {      
+                uint32_t n = sizeof(SlotMeta) - mo;      
+    
+                if (n > chunk) {      
+                    n = chunk;      
+                }      
+    
+                memcpy(      
+                    page,      
+                    reinterpret_cast<const uint8_t*>(&meta) + mo,      
+                    n      
+                );      
+            }      
+        }      
+        else if (src != nullptr) {      
+            memcpy(page, src, chunk);      
+        }      
+        else {      
+            memset(page, 0xFF, chunk);      
+        }      
+    
+        if (!do_flash_program_locked(target + off, page, chunk)) {      
+            Serial.printf(      
+                "[FM] ERROR: state-slot program failed at 0x%06lx\n",      
+                (unsigned long)(target + off)      
+            );      
+            ok = false;    
+            break;      
+        }      
+    
+        off += chunk;      
+    }      
+    
+    Serial.printf("[SS] ops done ok=%d, unpark\n", (int)ok);    
+    core_sync_unpark_core1();    
+    
+    if (!ok) {    
         dbg_c0_stage = 0;    
         return;    
     }    
-  
-    int32_t next_slot =    
-        (current_active_slot + 1) % SLOTS;    
-  
-    uint32_t next_seq =    
-        current_max_seq + 1;    
-  
-    if (current_active_slot == -1) {    
-        next_slot = 0;    
-        next_seq = 1;    
-    }    
-  
-    SlotMeta meta;    
-  
-    memset(&meta, 0xFF, sizeof(meta));    
-  
-    meta.magic = SLOT_MAGIC;    
-    meta.seq = next_seq;    
-    meta.crc32 = 0;    
-    meta.log_write_ptr = log_write_ptr;    
-  
-    Serial.printf("[SS] meta built slot=%ld seq=%lu\n",  
-        (long)next_slot, (unsigned long)next_seq);  
-  
-    uint32_t crc = 0xFFFFFFFFu;    
-    uint32_t off = 0;    
-  
-    while (off < SLOT_META_OFF) {    
-        uint32_t avail = 0;    
-  
-        const uint8_t* src =    
-            slot_src(off, &avail);    
-  
-        if (avail == 0 || off + avail > SLOT_META_OFF) {    
-            Serial.println("[FM] ERROR: invalid slot source range");    
-            dbg_c0_stage = 0;    
-            return;    
-        }    
-  
-        if (src != nullptr) {    
-            crc = crc32_update(crc, src, avail);    
-        }    
-        else {    
-            for (uint32_t n = 0; n < avail; ++n) {    
-                crc ^= 0xFF;    
-  
-                for (int b = 0; b < 8; ++b) {    
-                    crc = (crc >> 1) ^    
-                        (0xEDB88320u & (-(int32_t)(crc & 1)));    
-                }    
-            }    
-        }    
-  
-        off += avail;    
-    }    
-  
-    crc = crc32_update(    
-        crc,    
-        reinterpret_cast<const uint8_t*>(&meta),    
-        offsetof(SlotMeta, crc32)    
-    );    
-  
-    const uint8_t zeros[4] = {0, 0, 0, 0};    
-  
-    crc = crc32_update(crc, zeros, sizeof(zeros));    
-  
-    crc = crc32_update(    
-        crc,    
-        reinterpret_cast<const uint8_t*>(&meta) +    
-            offsetof(SlotMeta, crc32) + 4,    
-        sizeof(SlotMeta) -    
-            offsetof(SlotMeta, crc32) - 4    
-    );    
-  
-    meta.crc32 = ~crc;    
-  
-    Serial.printf("[SS] crc done\n");  
-  
-    const uint32_t target =    
-        RING_OFFSET +    
-        (uint32_t)next_slot * SLOT_SIZE;    
-  
-    if (!safe_flash_erase(target, SLOT_SIZE)) {    
-        Serial.println("[FM] ERROR: state-slot erase failed");    
-        dbg_c0_stage = 0;    
-        return;    
-    }    
-  
-    Serial.printf("[SS] erased, programming\n");  
-  
-    off = 0;    
-  
-    while (off < SLOT_SIZE) {    
-        alignas(4) uint8_t page[FLASH_PAGE_SIZE];    
-  
-        uint32_t avail = 0;    
-  
-        const uint8_t* src =    
-            slot_src(off, &avail);    
-  
-        uint32_t chunk =    
-            avail < FLASH_PAGE_SIZE ?    
-            avail : FLASH_PAGE_SIZE;    
-  
-        if (chunk == 0 ||    
-            off + chunk > SLOT_SIZE) {    
-            Serial.println("[FM] ERROR: invalid state-slot page range");    
-            dbg_c0_stage = 0;    
-            return;    
-        }    
-  
-        if (off >= SLOT_META_OFF) {    
-            const uint32_t mo = off - SLOT_META_OFF;    
-  
-            chunk = FLASH_PAGE_SIZE;    
-  
-            memset(page, 0xFF, chunk);    
-  
-            if (mo < sizeof(SlotMeta)) {    
-                uint32_t n = sizeof(SlotMeta) - mo;    
-  
-                if (n > chunk) {    
-                    n = chunk;    
-                }    
-  
-                memcpy(    
-                    page,    
-                    reinterpret_cast<const uint8_t*>(&meta) + mo,    
-                    n    
-                );    
-            }    
-        }    
-        else if (src != nullptr) {    
-            memcpy(page, src, chunk);    
-        }    
-        else {    
-            memset(page, 0xFF, chunk);    
-        }    
-  
-        if (!safe_flash_program(target + off, page, chunk)) {    
-            Serial.printf(    
-                "[FM] ERROR: state-slot program failed at 0x%06lx\n",    
-                (unsigned long)(target + off)    
-            );    
-  
-            dbg_c0_stage = 0;    
-            return;    
-        }    
-  
-        off += chunk;    
-    }    
-  
-    Serial.printf("[SS] programmed, flush\n");  
-  
-    flash_flush_cache();    
-  
-    current_active_slot = next_slot;    
-    current_max_seq = next_seq;    
-  
-    Serial.printf(    
-        "[FM] save_state: slot=%ld seq=%lu\n",    
-        (long)next_slot,    
-        (unsigned long)next_seq    
-    );    
-  
-    dbg_c0_stage = 0;    
+    
+    Serial.printf("[SS] programmed, flush\n");    
+    
+    flash_flush_cache();      
+    
+    current_active_slot = next_slot;      
+    current_max_seq = next_seq;      
+    
+    Serial.printf(      
+        "[FM] save_state: slot=%ld seq=%lu\n",      
+        (long)next_slot,      
+        (unsigned long)next_seq      
+    );      
+    
+    dbg_c0_stage = 0;      
 }
 
 // ---------------------------------------------------------------------------
