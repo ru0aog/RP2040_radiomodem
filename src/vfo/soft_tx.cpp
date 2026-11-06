@@ -77,7 +77,7 @@ static inline uint64_t vfo_effective_pll_max(void) {
 // Профили тактирования {fbdiv, p1, p2, clk_sys_hz, vsel, is_oc, refdiv}  
 PllConfig pll_nominal   = { 133, 6, 2, 133000000ULL, (uint32_t)VREG_VOLTAGE_DEFAULT, false, 1 };  
 PllConfig pll_overclock = {  69, 3, 2, 138004025ULL, (uint32_t)VREG_VOLTAGE_DEFAULT, false, 1 };  
-PllConfig pll_ceiling = { 250, 2, 2, 250000000ULL, VREG_VOLTAGE_1_25, true, 3 };  
+PllConfig pll_ceiling = { 250, 2, 2, 250000000ULL, VREG_VOLTAGE_1_30, true, 3 };  
 // VCO = 12М × 250/3 = 1000 МГц; clk = 1000/(2×2) = 250 МГц  
 // p1=2 ≥ p2=2, VCO в [750,1600] — валидно для скана
 

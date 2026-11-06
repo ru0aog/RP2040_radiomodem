@@ -42,8 +42,8 @@ uint32_t quad_vfo_clk_sys_meas_hz(void) { return meas_clk_sys_hz(); }
   
 uint32_t quad_vfo_vsel_for(uint64_t clk_hz) {  
   if (clk_hz >= 250000000ULL)      return VREG_VOLTAGE_1_30;  
-  else if (clk_hz >= 200000000ULL) return VREG_VOLTAGE_1_25;  
-  else if (clk_hz > 133000000ULL)  return VREG_VOLTAGE_1_15;  
+  else if (clk_hz >= 200000000ULL) return VREG_VOLTAGE_1_30;  
+  else if (clk_hz > 133000000ULL)  return VREG_VOLTAGE_1_30;  
   return VREG_VOLTAGE_DEFAULT;  
 }  
 
