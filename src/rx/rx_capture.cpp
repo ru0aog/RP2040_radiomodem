@@ -374,3 +374,52 @@ uint32_t rx_capture_dropped(void) { return rx_dropped; }
 bool rx_capture_is_running(void) {  
     return rx_running;  
 }
+
+// Минимальный тест ADC->DMA на разгоне. Всё в RAM, без IRQ, без DSP.  
+// Результат — в SRAM-счётчиках, читаются с Core 0.  
+  
+volatile uint32_t dma_test_tc_start = 0;    // transfer_count на старте  
+volatile uint32_t dma_test_tc_end   = 0;    // transfer_count через ~N итераций  
+volatile uint32_t dma_test_iters    = 0;    // сколько итераций прожили  
+volatile uint32_t dma_test_done     = 0;    // 1 = тест завершился  
+  
+static volatile uint32_t dma_test_buf[512]; // приёмный буфер в SRAM  
+  
+void __not_in_flash_func(dma_overclock_test)(void) {  
+    // ADC: два канала round-robin, как в боевом захвате  
+    adc_init();  
+    adc_gpio_init(26);  
+    adc_gpio_init(27);  
+    adc_select_input(0);  
+    adc_set_round_robin(0x03);  
+    adc_fifo_setup(true, true, 1, false, false);  
+    adc_set_clkdiv(191.0f);   // 250 kS/s, как в бою  
+  
+    // Один DMA-канал, без chain, без IRQ  
+    int ch = dma_claim_unused_channel(true);  
+    dma_channel_config c = dma_channel_get_default_config(ch);  
+    channel_config_set_transfer_data_size(&c, DMA_SIZE_32);  
+    channel_config_set_read_increment(&c, false);  
+    channel_config_set_write_increment(&c, true);  
+    channel_config_set_dreq(&c, DREQ_ADC);  
+    dma_channel_configure(ch, &c, (void*)dma_test_buf,  
+                          &adc_hw->fifo, 512, false);  
+  
+    adc_fifo_drain();  
+    adc_run(true);  
+    dma_channel_start(ch);  
+  
+    dma_test_tc_start = dma_hw->ch[ch].transfer_count;  
+  
+    // Ждём ~несколько мс чистым спином — никаких вызовов наружу  
+    for (volatile uint32_t i = 0; i < 2000000u; ++i) {  
+        dma_test_iters = i;  
+    }  
+  
+    dma_test_tc_end = dma_hw->ch[ch].transfer_count;  
+    dma_test_done = 1;  
+  
+    // Стоп — чтобы не мешать дальнейшему коду  
+    adc_run(false);  
+    dma_channel_abort(ch);  
+}

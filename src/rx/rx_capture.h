@@ -21,3 +21,5 @@ uint32_t rx_capture_dropped(void);        // суммарный счётчик �
 
 extern volatile uint32_t rx_cap_isr_count;   // счётчик входов DMA IRQ, диагностика
 extern volatile uint32_t rx_drop_scratch, rx_drop_queue_full, rx_drop_busy;
+
+void __not_in_flash_func(dma_overclock_test)(void);
