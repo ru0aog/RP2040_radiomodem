@@ -238,8 +238,8 @@ void setup1() {
   cat_set_freq_hz(3602000);          // зеркало FA для ответов CAT (s_rx_hz)    
   rx_dsp_start(3602000);             // NCO = f_rx - vfo_quad_lo_hz()
   rx_dsp_set_demod(RXD_DEMOD_USB);   // или соответствующее имя API
-  //rx_capture_start();                // DMA запускаем ПОСЛЕ настройки NCO  
-  dma_overclock_test();  
+  rx_capture_start();                // DMA запускаем ПОСЛЕ настройки NCO  
+  //dma_overclock_test();  
 }  
   
 void loop1() {  

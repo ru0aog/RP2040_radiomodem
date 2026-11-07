@@ -290,7 +290,7 @@ void __not_in_flash_func(rx_capture_start)(void) {
     adc_select_input(0);    
     
     rx_running = true;    
-    irq_set_enabled(DMA_IRQ_0, true);    
+    //irq_set_enabled(DMA_IRQ_0, true);    
     Serial.println("[CAP] m8: irq enabled");   // МАРКЕР  
     
     dma_channel_start(rx_dma_a);    
@@ -422,4 +422,15 @@ void __not_in_flash_func(dma_overclock_test)(void) {
     // Стоп — чтобы не мешать дальнейшему коду  
     adc_run(false);  
     dma_channel_abort(ch);  
+
+    // в loop(), однократно после done:  
+    static bool printed = false;  
+    if (!printed && dma_test_done) {  
+        printed = true;  
+        Serial.printf("[DMAT] tc_start=%lu tc_end=%lu iters=%lu\n",  
+                    (unsigned long)dma_test_tc_start,  
+                    (unsigned long)dma_test_tc_end,  
+                    (unsigned long)dma_test_iters);  
+    }
+
 }
