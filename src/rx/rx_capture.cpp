@@ -186,6 +186,8 @@ static void __not_in_flash_func(rx_handle_completed_channel)(
 // ---------------------------------------------------------------------------  
 // ISR DMA_IRQ_0 (Core 1)  
 // ---------------------------------------------------------------------------  
+
+/*
 static void __not_in_flash_func(rx_dma_irq)(void) {    
     ++rx_cap_isr_count;    
     static bool first_irq = true;  
@@ -200,7 +202,53 @@ static void __not_in_flash_func(rx_dma_irq)(void) {
     if (a_pending) rx_handle_completed_channel(a, true);    
     if (b_pending) rx_handle_completed_channel(b, false);    
 }
+*/
+
+
+static void __not_in_flash_func(rx_dma_irq)(void) {  
+    ++rx_cap_isr_count;  
+    const int a = rx_dma_a;  
+    if (a < 0 || !dma_channel_get_irq0_status(a)) return;  
+    dma_channel_acknowledge_irq0(a);  
   
+    // Буфер, который только что заполнен  
+    volatile uint32_t* done_buf = (volatile uint32_t*)rx_dma_a_target;  
+  
+    // Публикация в SPSC-очередь (как в боевой версии — логика rx_queue)  
+    const uint8_t head = rx_q_head;  
+    const uint8_t next = (uint8_t)((head + 1u) % RX_QUEUE_DEPTH);  
+    if (next != rx_q_tail) {  
+        rx_queue[head] = done_buf;  
+        __dmb();  
+        rx_q_head = next;  
+    } else {  
+        ++rx_dropped;  
+        ++rx_drop_queue_full;  
+        // буфер сразу свободен — не помечаем busy  
+    }  
+  
+    // Переключение на следующий буфер пинг-понга  
+    rx_a_sel ^= 1u;  
+    volatile uint32_t* next_buf = rx_a_sel ? rx_buf_a1 : rx_buf_a0;  
+    if (next != rx_q_tail) {  
+        // буфер ушёл в очередь — пометить занятым  
+        if      (done_buf == rx_buf_a0) rx_busy_a[0] = true;  
+        else if (done_buf == rx_buf_a1) rx_busy_a[1] = true;  
+    }  
+    // Если следующий буфер занят — берём b-буферы как запасные (или дроп)  
+    if ((rx_a_sel ? rx_busy_a[1] : rx_busy_a[0])) {  
+        ++rx_dropped;  
+        ++rx_drop_busy;  
+        next_buf = rx_a_sel ? rx_buf_b1 : rx_buf_b0;   // запасной пул  
+    }  
+    rx_dma_a_target = next_buf;  
+  
+    // Перезапуск канала на новый буфер  
+    dma_channel_set_write_addr(a, next_buf, false);  
+    dma_channel_set_trans_count(a, RX_BLOCK_TRANSFERS, true);  // trigger=true — старт  
+}
+
+
 // ---------------------------------------------------------------------------  
 // Запуск захвата (после rx_dsp_start — NCO уже настроен)  
 // ---------------------------------------------------------------------------  
@@ -313,8 +361,9 @@ void __not_in_flash_func(rx_capture_start)(void) {
 }
 */
 
+
 void __not_in_flash_func(rx_capture_start)(void) {  
-    // DMA_IRQ_0 должен жить на Core 1 (там же DSP-поллинг очереди).  
+    // DMA_IRQ_0 живёт на Core 1 (там же DSP-поллинг очереди).  
     assert(get_core_num() == 1);  
   
     if (rx_running) return;  
@@ -334,71 +383,55 @@ void __not_in_flash_func(rx_capture_start)(void) {
     rx_dma_a_target = rx_buf_a0;  
     rx_dma_b_target = rx_buf_b0;  
   
-    Serial.println("[CAP] m1: init done");   // МАРКЕР  
+    Serial.println("[CAP] m1: init done");  
   
-    const uint32_t clk_adc_hz = clock_get_hz(clk_adc);  
     const uint32_t clk_sys_hz = clock_get_hz(clk_sys);  
-    Serial.printf("[CAP] m2: ssi baudr=%lu ssienr=%lu\n",  
-                  (unsigned long)ssi_hw->baudr, (unsigned long)ssi_hw->ssienr);  
+    const uint32_t clk_adc_hz = clock_get_hz(clk_adc);  
+    Serial.printf("[CAP] clk_adc=%lu clk_sys=%lu\n",  
+                  (unsigned long)clk_adc_hz, (unsigned long)clk_sys_hz);  
   
     adc_init();  
-    Serial.println("[CAP] m3: adc_init");   // МАРКЕР  
-  
-    adc_gpio_init(PIN_ADC_I);  
-    adc_gpio_init(PIN_ADC_Q);  
-    adc_set_round_robin(0x03);  
+    adc_gpio_init(RX_ADC_PIN_I);    
+    adc_gpio_init(RX_ADC_PIN_Q);
+    adc_set_round_robin((1u << 0) | (1u << 1));  
     adc_fifo_setup(true, true, 1, false, false);  
-    const float adc_div = (float)clk_adc_hz / (float)RX_ADC_SAMPLE_RATE_HZ - 1.0f;  
+    float adc_div = (float)clk_adc_hz / (float)RX_ADC_SAMPLE_RATE_HZ - 1.0f;    
+    if (adc_div < 0.0f) adc_div = 0.0f;
     adc_set_clkdiv(adc_div);  
-    Serial.println("[CAP] m4: adc cfg");   // МАРКЕР  
+    Serial.println("[CAP] m4: adc cfg");  
   
-    if (rx_dma_a < 0) rx_dma_a = dma_claim_unused_channel(true);  
-    if (rx_dma_b < 0) rx_dma_b = dma_claim_unused_channel(true);  
-    Serial.println("[CAP] m5: dma claimed");   // МАРКЕР  
+    // ОДИН канал — два активных канала вешают систему на разгоне  
+    rx_dma_a = dma_claim_unused_channel(true);  
+    rx_dma_b = -1;  
+    Serial.println("[CAP] m5: dma claimed (single)");  
   
     dma_channel_config ca = dma_channel_get_default_config(rx_dma_a);  
     channel_config_set_transfer_data_size(&ca, DMA_SIZE_32);  
     channel_config_set_read_increment(&ca, false);  
     channel_config_set_write_increment(&ca, true);  
     channel_config_set_dreq(&ca, DREQ_ADC);  
-    channel_config_set_chain_to(&ca, rx_dma_b);          // A -> B  
+    // chain_to НЕ используется — перезапуск программный, в rx_dma_irq  
     dma_channel_configure(rx_dma_a, &ca, rx_dma_a_target, &adc_hw->fifo,  
                           RX_BLOCK_TRANSFERS, false);  
+    Serial.println("[CAP] m6: dma configured (single)");  
   
-    dma_channel_config cb = dma_channel_get_default_config(rx_dma_b);  
-    channel_config_set_transfer_data_size(&cb, DMA_SIZE_32);  
-    channel_config_set_read_increment(&cb, false);  
-    channel_config_set_write_increment(&cb, true);  
-    channel_config_set_dreq(&cb, DREQ_ADC);  
-    channel_config_set_chain_to(&cb, rx_dma_a);          // B -> A  
-    dma_channel_configure(rx_dma_b, &cb, rx_dma_b_target, &adc_hw->fifo,  
-                          RX_BLOCK_TRANSFERS, false);  
-    Serial.println("[CAP] m6: dma configured (chain)");   // МАРКЕР  
-  
-    // БИСЕКТ: IRQ полностью выключен — ни handler, ни enable.  
-    // dma_channel_set_irq0_enabled(rx_dma_a, true);  
-    // dma_channel_set_irq0_enabled(rx_dma_b, true);  
-    // irq_set_exclusive_handler(DMA_IRQ_0, rx_dma_irq);  
-    // irq_set_enabled(DMA_IRQ_0, true);  
-    Serial.println("[CAP] m7/m8: irq skipped");   // МАРКЕР  
+    dma_channel_set_irq0_enabled(rx_dma_a, true);  
+    irq_set_exclusive_handler(DMA_IRQ_0, rx_dma_irq);  
+    irq_set_enabled(DMA_IRQ_0, true);  
+    Serial.println("[CAP] m8: irq enabled");  
   
     dma_channel_start(rx_dma_a);  
-    Serial.println("[CAP] m9: chA started");   // МАРКЕР  
+    Serial.println("[CAP] m9: chA started");  
     adc_run(true);  
-    Serial.println("[CAP] m10: adc running");   // МАРКЕР  
-  
-    Serial.printf("[CAP] chA=%d chB=%d block=%u pairs transfers=%u\n",  
-                  rx_dma_a, rx_dma_b,  
-                  (unsigned)RX_BLOCK_SAMPLES, (unsigned)RX_BLOCK_TRANSFERS);  
-    Serial.printf("[CAP] ADC target=%lu/s clkdiv=%ld\n",  
-                  (unsigned long)RX_ADC_SAMPLE_RATE_HZ, (long)(adc_div + 0.5f));  
+    Serial.println("[CAP] m10: adc running");  
   
     rx_running = true;  
-    Serial.println("[CAP] m11: started ok");   // МАРКЕР  
   
-    gpio_init(11);  
-    gpio_set_dir(11, GPIO_OUT);  
-    gpio_put(11, 0);  
+    Serial.printf("[CAP] chA=%d (single+irq) block=%u pairs transfers=%u\n",  
+                  rx_dma_a, (unsigned)RX_BLOCK_SAMPLES, (unsigned)RX_BLOCK_TRANSFERS);  
+    Serial.printf("[CAP] ADC target=%lu/s clkdiv=%ld\n",  
+                  (unsigned long)RX_ADC_SAMPLE_RATE_HZ, (long)(adc_div + 0.5f));  
+    Serial.println("[CAP] m11: started ok");  
 }
 
 
