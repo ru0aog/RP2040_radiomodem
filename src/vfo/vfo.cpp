@@ -9,6 +9,7 @@
 #include "quad_vfo/quad_vfo.h"     // вендорная копия ru0aog/quad_vfo  
 #include "../pins.h"              // PIN_QUAD_I  
 #include "../mem/mem_arena.h"
+#include "quad_vfo/quad_vfo_pll.h"
 
 #include "hardware/clocks.h"
 
@@ -226,10 +227,15 @@ void vfo_quad_debug(void) { quad_vfo_debug(); }
 // ============================================================================  
 // ДИАГНОСТИКА  
 // ============================================================================  
-uint32_t vfo_clk_sys_hz(void) {  
-  // Фактическая шина: после quad_vfo_start() clk_sys может быть  
-  // перепрошит под LO (напр. 337.5 МГц), кэш soft_tx врёт.  
-  return (uint32_t)clock_get_hz(clk_sys);  
+uint32_t vfo_clk_sys_hz(void) {    
+  // Фактическая шина: после quad_vfo_start() clk_sys перепрошит под LO    
+  // (напр. 373 МГц), кэш clock_get_hz врёт — берём подтверждённое    
+  // значение из PLL-подсистемы quad_vfo.    
+  if (s_active == &s_eng_quad_vfo) {    
+    uint32_t q = quad_vfo_clk_sys_hz();    
+    if (q) return q;    
+  }    
+  return (uint32_t)clock_get_hz(clk_sys);    
 }
   
 uint32_t vfo_actual_hz(void) {  
