@@ -659,7 +659,7 @@ void rx_dsp_stop(void) {
 }  
   
 // Выкачка всех доступных блоков из rx_capture (Core 1, из loop1()).  
-void rx_dsp_poll(void) {  
+void __not_in_flash_func(rx_dsp_poll)(void) {
     const volatile uint32_t* blk;  
     bool got = false;  
     while ((blk = rx_capture_get_block()) != NULL) {  

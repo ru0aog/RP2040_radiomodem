@@ -61,7 +61,7 @@ void trx_init(TrxVfoHook vfo_hook) {
 // ============================================================================  
 // CORE 1  
 // ============================================================================  
-void trx_poll_core1(void) {    
+void __not_in_flash_func(trx_poll_core1)(void) {
   if (!s_req_active) return;    
     
   uint32_t ints = save_and_disable_interrupts();      

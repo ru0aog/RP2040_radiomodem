@@ -205,6 +205,7 @@ static void __not_in_flash_func(rx_dma_irq)(void) {
 // Запуск захвата (после rx_dsp_start — NCO уже настроен)  
 // ---------------------------------------------------------------------------  
 
+/*
 void __not_in_flash_func(rx_capture_start)(void) {  
     // DMA_IRQ_0 должен жить на Core 1 (там же DSP-поллинг очереди).    
     assert(get_core_num() == 1);  
@@ -310,6 +311,97 @@ void __not_in_flash_func(rx_capture_start)(void) {
     gpio_set_dir(11, GPIO_OUT);  
     gpio_put(11, 0);
 }
+*/
+
+void __not_in_flash_func(rx_capture_start)(void) {  
+    // DMA_IRQ_0 должен жить на Core 1 (там же DSP-поллинг очереди).  
+    assert(get_core_num() == 1);  
+  
+    if (rx_running) return;  
+  
+    rx_q_head = 0;  
+    rx_q_tail = 0;  
+    rx_dropped = 0;  
+    rx_cap_isr_count = 0;  
+    rx_drop_scratch = 0;  
+    rx_drop_queue_full = 0;  
+    rx_drop_busy = 0;  
+    rx_irq_both_pending = 0;  
+    rx_busy_a[0] = rx_busy_a[1] = false;  
+    rx_busy_b[0] = rx_busy_b[1] = false;  
+    rx_a_sel = 0;  
+    rx_b_sel = 0;  
+    rx_dma_a_target = rx_buf_a0;  
+    rx_dma_b_target = rx_buf_b0;  
+  
+    Serial.println("[CAP] m1: init done");   // МАРКЕР  
+  
+    const uint32_t clk_adc_hz = clock_get_hz(clk_adc);  
+    const uint32_t clk_sys_hz = clock_get_hz(clk_sys);  
+    Serial.printf("[CAP] m2: ssi baudr=%lu ssienr=%lu\n",  
+                  (unsigned long)ssi_hw->baudr, (unsigned long)ssi_hw->ssienr);  
+  
+    adc_init();  
+    Serial.println("[CAP] m3: adc_init");   // МАРКЕР  
+  
+    adc_gpio_init(PIN_ADC_I);  
+    adc_gpio_init(PIN_ADC_Q);  
+    adc_set_round_robin(0x03);  
+    adc_fifo_setup(true, true, 1, false, false);  
+    const float adc_div = (float)clk_adc_hz / (float)RX_ADC_SAMPLE_RATE_HZ - 1.0f;  
+    adc_set_clkdiv(adc_div);  
+    Serial.println("[CAP] m4: adc cfg");   // МАРКЕР  
+  
+    if (rx_dma_a < 0) rx_dma_a = dma_claim_unused_channel(true);  
+    if (rx_dma_b < 0) rx_dma_b = dma_claim_unused_channel(true);  
+    Serial.println("[CAP] m5: dma claimed");   // МАРКЕР  
+  
+    dma_channel_config ca = dma_channel_get_default_config(rx_dma_a);  
+    channel_config_set_transfer_data_size(&ca, DMA_SIZE_32);  
+    channel_config_set_read_increment(&ca, false);  
+    channel_config_set_write_increment(&ca, true);  
+    channel_config_set_dreq(&ca, DREQ_ADC);  
+    channel_config_set_chain_to(&ca, rx_dma_b);          // A -> B  
+    dma_channel_configure(rx_dma_a, &ca, rx_dma_a_target, &adc_hw->fifo,  
+                          RX_BLOCK_TRANSFERS, false);  
+  
+    dma_channel_config cb = dma_channel_get_default_config(rx_dma_b);  
+    channel_config_set_transfer_data_size(&cb, DMA_SIZE_32);  
+    channel_config_set_read_increment(&cb, false);  
+    channel_config_set_write_increment(&cb, true);  
+    channel_config_set_dreq(&cb, DREQ_ADC);  
+    channel_config_set_chain_to(&cb, rx_dma_a);          // B -> A  
+    dma_channel_configure(rx_dma_b, &cb, rx_dma_b_target, &adc_hw->fifo,  
+                          RX_BLOCK_TRANSFERS, false);  
+    Serial.println("[CAP] m6: dma configured (chain)");   // МАРКЕР  
+  
+    // БИСЕКТ: IRQ полностью выключен — ни handler, ни enable.  
+    // dma_channel_set_irq0_enabled(rx_dma_a, true);  
+    // dma_channel_set_irq0_enabled(rx_dma_b, true);  
+    // irq_set_exclusive_handler(DMA_IRQ_0, rx_dma_irq);  
+    // irq_set_enabled(DMA_IRQ_0, true);  
+    Serial.println("[CAP] m7/m8: irq skipped");   // МАРКЕР  
+  
+    dma_channel_start(rx_dma_a);  
+    Serial.println("[CAP] m9: chA started");   // МАРКЕР  
+    adc_run(true);  
+    Serial.println("[CAP] m10: adc running");   // МАРКЕР  
+  
+    Serial.printf("[CAP] chA=%d chB=%d block=%u pairs transfers=%u\n",  
+                  rx_dma_a, rx_dma_b,  
+                  (unsigned)RX_BLOCK_SAMPLES, (unsigned)RX_BLOCK_TRANSFERS);  
+    Serial.printf("[CAP] ADC target=%lu/s clkdiv=%ld\n",  
+                  (unsigned long)RX_ADC_SAMPLE_RATE_HZ, (long)(adc_div + 0.5f));  
+  
+    rx_running = true;  
+    Serial.println("[CAP] m11: started ok");   // МАРКЕР  
+  
+    gpio_init(11);  
+    gpio_set_dir(11, GPIO_OUT);  
+    gpio_put(11, 0);  
+}
+
+
 
 // ---------------------------------------------------------------------------  
 // Останов DMA+ADC. Вызывается из core_sync_core1_poll при парковке — rx_dsp_stop не обязателен
