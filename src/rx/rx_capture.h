@@ -2,7 +2,7 @@
 // ============================================================================  
 // Захват ADC+DMA: ADC0=I (GP26), ADC1=Q (GP27), round-robin, 16-бит  
 // переносы в 32-бит слова [15:0]=I, [31:16]=Q. Пинг-понг два канала DMA  
-// через chain_to; IRQ0 на Core 0 публикует блоки в SPSC-очередь для Core 1.  
+// через chain_to; IRQ0 на Core 1 публикует блоки в SPSC-очередь для Core 1.  
 // Порт из RP2040_receiver/src/dsp/rx_capture.cpp.  
 // ============================================================================  
 #pragma once  
@@ -22,4 +22,3 @@ uint32_t rx_capture_dropped(void);        // суммарный счётчик �
 extern volatile uint32_t rx_cap_isr_count;   // счётчик входов DMA IRQ, диагностика
 extern volatile uint32_t rx_drop_scratch, rx_drop_queue_full, rx_drop_busy;
 
-void __not_in_flash_func(dma_overclock_test)(void);
