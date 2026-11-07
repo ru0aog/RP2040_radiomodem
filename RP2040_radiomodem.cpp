@@ -94,10 +94,20 @@ void setup() {
   // set_clk_sys с флаг-парковкой; без poll() парк уйдёт в PARK TIMEOUT.    
   // В этой точке на Core 0 — пустой цикл без USB: живой TinyUSB-стек    
   // во время парковки кладёт handshake.    
-  while (!core1_pll_done) {    
-      core_sync_poll();    
-      tight_loop_contents();    
-  }    
+
+  // Таймаут 10 с: если Core 1 умер в PLL-окне — не висеть вечно,  
+  // а выйти с диагностикой (система останется на 133 МГц, но живая).  
+  const uint32_t t0 = millis();  
+    while (!core1_pll_done) {  
+      core_sync_poll();  
+      tight_loop_contents();  
+      if ((uint32_t)(millis() - t0) > 10000u) {  
+        Serial.println("[ERR] core1_pll_done timeout — Core 1 stuck in PLL window");  
+        Serial.flush();  
+        break;  
+      }  
+    }  
+
   file_manager_set_flash_safe_ready(true);    
   Serial.println("[FM] core1 init: flash writes ENABLED");    
   Serial.flush();    
@@ -216,7 +226,11 @@ void loop() {
 // ============================================================================    
 void setup1() {    
     
-  while (!core0_ready) tight_loop_contents();    
+  // Таймаут ~5 с счётным циклом: если Core 0 не поднял флаг — идём дальше,  
+  // иначе Core 1 мёртв навсегда без всякой диагностики.  
+  for (uint32_t spin = 0; !core0_ready && spin < 20000000u; ++spin) {  
+      tight_loop_contents();  
+  }
     
   // Стартовый RX: VFO-hook → quad_vfo → set_clk_sys → разгон до потолка    
   // pll_ceiling (380 МГц, фактически ~373 МГц по скану кандидатов).    
