@@ -41,7 +41,7 @@ static uint32_t        s_park0_gen = 0;
 static core_sync_stats s_stats;  
   
 static spin_lock_t *s_pll_lock = NULL;  
-static volatile uint32_t s_pll_lock_irq = 0;   // saved_irq для spin_unlock
+static volatile uint32_t s_pll_lock_irq[2] = {0, 0};
   
 void core_sync_init(void) {  
     if (get_core_num() != 0) return;  
@@ -50,16 +50,19 @@ void core_sync_init(void) {
     __dmb();  
 }  
   
-bool core_sync_pll_try_lock(void) {  
-    if (!s_pll_lock) return false;  
-    uint32_t irq = spin_try_lock_unsafe(s_pll_lock);  
-    if (irq == PICO_ERROR_TIMEOUT) return false;  
-    s_pll_lock_irq = irq;  
+// core_sync_pll_try_lock:  
+bool __not_in_flash_func(core_sync_pll_try_lock)(void) {  
+    const uint32_t core = get_core_num();  
+    uint32_t st = spin_try_lock_unsafe(s_pll_lock);  
+    if (st == PICO_ERROR_TIMEOUT) return false;  
+    s_pll_lock_irq[core] = st;  
     return true;  
 }  
   
-void core_sync_pll_unlock(void) {  
-    if (s_pll_lock) spin_unlock(s_pll_lock, s_pll_lock_irq);  
+// core_sync_pll_unlock:  
+void __not_in_flash_func(core_sync_pll_unlock)(void) {  
+    const uint32_t core = get_core_num();  
+    spin_unlock(s_pll_lock, s_pll_lock_irq[core]);  
 }
   
 // ============================================================================  

@@ -241,8 +241,17 @@ void setup1() {
   rx_capture_start();                // DMA запускаем ПОСЛЕ настройки NCO  
   //dma_overclock_test();  
 }  
-  
+
+
 void __not_in_flash_func(loop1)(void) {  
+  static bool pm_checked = false;  
+  if (!pm_checked) {  
+    pm_checked = true;  
+    uint32_t pm;  
+    __asm volatile ("mrs %0, primask" : "=r"(pm));  
+    if (pm) __asm volatile ("cpsie i" ::: "memory");  
+  }  
+
   static uint32_t hb = 0;  
   if ((++hb & 0x3FFFF) == 0) gpio_xor_mask(1u << 11);   // heartbeat  
   
