@@ -92,10 +92,15 @@ static void __not_in_flash_func(rx_dma_irq)(void) {
     // FCS.OVER — sticky-флаг: ADC записал в полный FIFO, отсчёт потерян.    
     // Окно между завершением блока и перезапуском — единственное место,    
     // где FIFO может наполниться при задержке обслуживания IRQ.    
-    if (adc_hw->fcs & ADC_FCS_OVER_BITS) {    
-        ++rx_adc_fcs_over;    
-        adc_hw->fcs = ADC_FCS_OVER_BITS;   // сброс sticky-флага (W1C)    
-    }    
+    if (adc_hw->fcs & ADC_FCS_OVER_BITS) {  
+        ++rx_adc_fcs_over;  
+        // OVER — W1C, остальные поля FCS (EN, DREQ_EN, SHIFT, ERR, THRESH) — RW:  
+        // записываем обратно текущую конфигурацию, иначе FIFO/DREQ отключатся.  
+        const uint32_t fcs_cfg = adc_hw->fcs &  
+            (ADC_FCS_EN_BITS | ADC_FCS_SHIFT_BITS | ADC_FCS_ERR_BITS |  
+             ADC_FCS_DREQ_EN_BITS | ADC_FCS_THRESH_BITS);  
+        adc_hw->fcs = fcs_cfg | ADC_FCS_OVER_BITS;  
+    } 
       
     volatile uint32_t* done_buf = (volatile uint32_t*)rx_dma_a_target;      
       
