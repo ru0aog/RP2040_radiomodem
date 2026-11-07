@@ -50,19 +50,24 @@ void core_sync_init(void) {
     __dmb();  
 }  
   
-bool __not_in_flash_func(core_sync_pll_try_lock)(void) {    
+bool __not_in_flash_func(core_sync_pll_try_lock)(void) {  
     if (!s_pll_lock) return false;  
-    const uint32_t core = get_core_num();    
-    uint32_t st = spin_try_lock_unsafe(s_pll_lock);    
-    if (st == PICO_ERROR_TIMEOUT) return false;    
-    s_pll_lock_irq[core] = st;    
-    return true;    
-}    
-    
-void __not_in_flash_func(core_sync_pll_unlock)(void) {    
+    const uint32_t core = get_core_num();  
+    const uint32_t irq = save_and_disable_interrupts();  
+    if (!spin_try_lock_unsafe(s_pll_lock)) {  
+        restore_interrupts(irq);  
+        return false;  
+    }  
+    s_pll_lock_irq[core] = irq;  
+    return true;  
+}  
+  
+void __not_in_flash_func(core_sync_pll_unlock)(void) {  
     if (!s_pll_lock) return;  
-    const uint32_t core = get_core_num();    
-    spin_unlock(s_pll_lock, s_pll_lock_irq[core]);    
+    const uint32_t core = get_core_num();  
+    const uint32_t irq = s_pll_lock_irq[core];  
+    spin_unlock_unsafe(s_pll_lock);  
+    restore_interrupts(irq);  
 }
   
 // ============================================================================  
