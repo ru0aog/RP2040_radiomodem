@@ -41,7 +41,7 @@ static uint32_t        s_park0_gen = 0;
 static core_sync_stats s_stats;  
   
 static spin_lock_t *s_pll_lock = NULL;  
-static volatile uint32_t s_pll_lock_irq[2] = {0, 0};
+static volatile uint32_t s_pll_lock_irq[2] = {0, 0}; // per-core: иначе ядра затирают чужой PRIMASK → DMA IRQ умирает на разгоне
   
 void core_sync_init(void) {  
     if (get_core_num() != 0) return;  
