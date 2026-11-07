@@ -1,254 +1,264 @@
-﻿// src/rx/rx_capture.cpp  
-// ============================================================================  
-// Захват ADC+DMA: ADC0=I (GP26), ADC1=Q (GP27), round-robin, 16-бит переносы  
-// в 32-бит слова [15:0]=I, [31:16]=Q. Пинг-понг двух буферов на одном DMA-канале, 
-// программный перезапуск из IRQ; 
-// DMA IRQ0 на Core 1 публикует блоки в SPSC-очередь для Core 1
-// Порт из RP2040_receiver/src/dsp/rx_capture.cpp. Буферы статические  
-// (DSP-путь не проходит через mem_arena — он живёт до mem_arena_switch,  
-// а пул сбрасывается при trx_switch).  
-// ============================================================================  
-#include <Arduino.h>  
-#include <string.h>  
-  
-#include "rx_capture.h"  
-#include "rx_dsp.h"  
-#include "../pins.h"  
-  
-#include "hardware/adc.h"  
-#include "hardware/dma.h"  
-#include "hardware/irq.h"  
-#include "hardware/sync.h"
-
-// Пины ADC — из карты пинов проекта; запасные дефолты по pins.h.  
-#ifndef RX_ADC_PIN_I  
-#define RX_ADC_PIN_I 26   // GP26 = ADC0, канал I  
-#endif  
-#ifndef RX_ADC_PIN_Q  
-#define RX_ADC_PIN_Q 27   // GP27 = ADC1, канал Q  
-#endif  
-  
-// Один блок = RX_BLOCK_SAMPLES пар I/Q → вдвое больше 16-битных переносов.  
-#define RX_BLOCK_TRANSFERS (2u * RX_BLOCK_SAMPLES)  
-  
-// Кольцевая очередь: один пустой слот отличает full от empty (ёмкость 3).  
-#define RX_QUEUE_DEPTH 4u  
-  
-#if RX_BLOCK_SAMPLES == 0  
-#error "RX_BLOCK_SAMPLES должен быть больше нуля"  
-#endif  
-  
-// ---------------------------------------------------------------------------  
-// Буферы DMA (volatile — пишутся DMA независимо от CPU)  
-// ---------------------------------------------------------------------------  
-static volatile uint32_t __attribute__((aligned(4))) rx_buf_a0[RX_BLOCK_SAMPLES];  
-static volatile uint32_t __attribute__((aligned(4))) rx_buf_a1[RX_BLOCK_SAMPLES];  
-static volatile uint32_t __attribute__((aligned(4))) rx_buf_b0[RX_BLOCK_SAMPLES];  
-static volatile uint32_t __attribute__((aligned(4))) rx_buf_b1[RX_BLOCK_SAMPLES];  
-  
-// Scratch — приёмник на случай, когда оба рабочих буфера канала заняты DSP.  
-static volatile uint32_t __attribute__((aligned(4))) rx_scratch_a[RX_BLOCK_SAMPLES];  
-  
-// ---------------------------------------------------------------------------  
-// SPSC-очередь завершённых блоков: пишет IRQ и читает DSP — оба на Core 1 
-// ---------------------------------------------------------------------------  
-static const volatile uint32_t* rx_queue[RX_QUEUE_DEPTH];  
-static volatile uint8_t rx_q_head = 0;  
-static volatile uint8_t rx_q_tail = 0;  
-  
-static volatile uint32_t rx_dropped = 0;  
-  
-// Диагностика — extern по rx_capture.h (считает modem/диагностика).  
-volatile uint32_t rx_cap_isr_count    = 0;   // входов в DMA IRQ  
-volatile uint32_t rx_drop_scratch     = 0;  
-volatile uint32_t rx_drop_queue_full  = 0;  
-volatile uint32_t rx_drop_busy        = 0;  
-  
-// ---------------------------------------------------------------------------  
-// Владение рабочими буферами (busy = опубликован DSP, не назначать DMA)  
-// ---------------------------------------------------------------------------  
-static volatile bool rx_busy_a[2] = { false, false };
-static volatile bool rx_busy_b[2] = { false, false };
-static volatile uint8_t rx_a_sel = 0;  
-static volatile uint8_t rx_b_sel = 0;  
-  
-static volatile uint32_t* rx_dma_a_target = rx_buf_a0;  
-  
-static int rx_dma_a = -1;  
-static volatile bool rx_running = false;  
-  
-// ---------------------------------------------------------------------------  
-// ISR DMA_IRQ_0 (Core 1)  
-// ---------------------------------------------------------------------------  
-
-static void __not_in_flash_func(rx_dma_irq)(void) {    
-    ++rx_cap_isr_count;    
-    const int a = rx_dma_a;    
-    if (a < 0 || !dma_channel_get_irq0_status(a)) return;    
-    dma_channel_acknowledge_irq0(a);    
-    if (!rx_running) return;    
+﻿// src/rx/rx_capture.cpp    
+// ============================================================================    
+// Захват ADC+DMA: ADC0=I (GP26), ADC1=Q (GP27), round-robin, 16-бит переносы    
+// в 32-бит слова [15:0]=I, [31:16]=Q. Пинг-понг двух буферов на одном DMA-канале,   
+// программный перезапуск из IRQ;   
+// DMA IRQ0 на Core 1 публикует блоки в SPSC-очередь для Core 1  
+// Порт из RP2040_receiver/src/dsp/rx_capture.cpp. Буферы статические    
+// (DSP-путь не проходит через mem_arena — он живёт до mem_arena_switch,    
+// а пул сбрасывается при trx_switch).    
+// ============================================================================    
+#include <Arduino.h>    
+#include <string.h>    
     
-    volatile uint32_t* done_buf = (volatile uint32_t*)rx_dma_a_target;    
+#include "rx_capture.h"    
+#include "rx_dsp.h"    
+#include "../pins.h"    
     
-    // Флаг занятости завершённого буфера — из любого пула (a или b)    
-    volatile bool* done_busy = NULL;    
-    if      (done_buf == rx_buf_a0) done_busy = &rx_busy_a[0];    
-    else if (done_buf == rx_buf_a1) done_busy = &rx_busy_a[1];    
-    else if (done_buf == rx_buf_b0) done_busy = &rx_busy_b[0];    
-    else if (done_buf == rx_buf_b1) done_busy = &rx_busy_b[1];    
-    // done_buf == rx_scratch_a → done_busy == NULL, блок не публикуем    
+#include "hardware/adc.h"    
+#include "hardware/dma.h"    
+#include "hardware/irq.h"    
+#include "hardware/sync.h"  
+  
+// Пины ADC — из карты пинов проекта; запасные дефолты по pins.h.    
+#ifndef RX_ADC_PIN_I    
+#define RX_ADC_PIN_I 26   // GP26 = ADC0, канал I    
+#endif    
+#ifndef RX_ADC_PIN_Q    
+#define RX_ADC_PIN_Q 27   // GP27 = ADC1, канал Q    
+#endif    
     
-    const uint8_t head = rx_q_head;    
-    const uint8_t next = (uint8_t)((head + 1u) % RX_QUEUE_DEPTH);    
+// Один блок = RX_BLOCK_SAMPLES пар I/Q → вдвое больше 16-битных переносов.    
+#define RX_BLOCK_TRANSFERS (2u * RX_BLOCK_SAMPLES)    
     
-    if (done_busy && next != rx_q_tail) {    
-        *done_busy = true;              // 1. владение — до публикации    
-        __dmb();    
-        rx_queue[head] = done_buf;      // 2. указатель в очередь    
-        __dmb();    
-        rx_q_head = next;               // 3. публикация    
-    } else {    
-        ++rx_dropped;    
-        if (next == rx_q_tail) ++rx_drop_queue_full;    
-        else                 ++rx_drop_scratch;   // блок был в scratch    
+// Кольцевая очередь: один пустой слот отличает full от empty (ёмкость 3).    
+#define RX_QUEUE_DEPTH 4u    
+    
+#if RX_BLOCK_SAMPLES == 0    
+#error "RX_BLOCK_SAMPLES должен быть больше нуля"    
+#endif    
+    
+// ---------------------------------------------------------------------------    
+// Буферы DMA (volatile — пишутся DMA независимо от CPU)    
+// ---------------------------------------------------------------------------    
+static volatile uint32_t __attribute__((aligned(4))) rx_buf_a0[RX_BLOCK_SAMPLES];    
+static volatile uint32_t __attribute__((aligned(4))) rx_buf_a1[RX_BLOCK_SAMPLES];    
+static volatile uint32_t __attribute__((aligned(4))) rx_buf_b0[RX_BLOCK_SAMPLES];    
+static volatile uint32_t __attribute__((aligned(4))) rx_buf_b1[RX_BLOCK_SAMPLES];    
+    
+// Scratch — приёмник на случай, когда оба рабочих буфера канала заняты DSP.    
+static volatile uint32_t __attribute__((aligned(4))) rx_scratch_a[RX_BLOCK_SAMPLES];    
+    
+// ---------------------------------------------------------------------------    
+// SPSC-очередь завершённых блоков: пишет IRQ и читает DSP — оба на Core 1   
+// ---------------------------------------------------------------------------    
+static const volatile uint32_t* rx_queue[RX_QUEUE_DEPTH];    
+static volatile uint8_t rx_q_head = 0;    
+static volatile uint8_t rx_q_tail = 0;    
+    
+static volatile uint32_t rx_dropped = 0;    
+    
+// Диагностика — extern по rx_capture.h (считает modem/диагностика).    
+volatile uint32_t rx_cap_isr_count    = 0;   // входов в DMA IRQ    
+volatile uint32_t rx_drop_scratch     = 0;    
+volatile uint32_t rx_drop_queue_full  = 0;    
+volatile uint32_t rx_drop_busy        = 0;    
+volatile uint32_t rx_adc_fcs_over     = 0;   // переполнения ADC FIFO (sticky FCS.OVER)    
+    
+// ---------------------------------------------------------------------------    
+// Владение рабочими буферами (busy = опубликован DSP, не назначать DMA)    
+// ---------------------------------------------------------------------------    
+static volatile bool rx_busy_a[2] = { false, false };  
+static volatile bool rx_busy_b[2] = { false, false };  
+static volatile uint8_t rx_a_sel = 0;    
+static volatile uint8_t rx_b_sel = 0;    
+    
+static volatile uint32_t* rx_dma_a_target = rx_buf_a0;    
+    
+static int rx_dma_a = -1;    
+static volatile bool rx_running = false;    
+    
+// ---------------------------------------------------------------------------    
+// ISR DMA_IRQ_0 (Core 1)    
+// ---------------------------------------------------------------------------    
+  
+static void __not_in_flash_func(rx_dma_irq)(void) {      
+    ++rx_cap_isr_count;      
+    const int a = rx_dma_a;      
+    if (a < 0 || !dma_channel_get_irq0_status(a)) return;      
+    dma_channel_acknowledge_irq0(a);      
+    if (!rx_running) return;      
+      
+    // FCS.OVER — sticky-флаг: ADC записал в полный FIFO, отсчёт потерян.    
+    // Окно между завершением блока и перезапуском — единственное место,    
+    // где FIFO может наполниться при задержке обслуживания IRQ.    
+    if (adc_hw->fcs & ADC_FCS_OVER_BITS) {    
+        ++rx_adc_fcs_over;    
+        adc_hw->fcs = ADC_FCS_OVER_BITS;   // сброс sticky-флага (W1C)    
+    }    
+      
+    volatile uint32_t* done_buf = (volatile uint32_t*)rx_dma_a_target;      
+      
+    // Флаг занятости завершённого буфера — из любого пула (a или b)      
+    volatile bool* done_busy = NULL;      
+    if      (done_buf == rx_buf_a0) done_busy = &rx_busy_a[0];      
+    else if (done_buf == rx_buf_a1) done_busy = &rx_busy_a[1];      
+    else if (done_buf == rx_buf_b0) done_busy = &rx_busy_b[0];      
+    else if (done_buf == rx_buf_b1) done_busy = &rx_busy_b[1];      
+    // done_buf == rx_scratch_a → done_busy == NULL, блок не публикуем      
+      
+    const uint8_t head = rx_q_head;      
+    const uint8_t next = (uint8_t)((head + 1u) % RX_QUEUE_DEPTH);      
+      
+    if (done_busy && next != rx_q_tail) {      
+        *done_busy = true;              // 1. владение — до публикации      
+        __dmb();      
+        rx_queue[head] = done_buf;      // 2. указатель в очередь      
+        __dmb();      
+        rx_q_head = next;               // 3. публикация      
+    } else {      
+        ++rx_dropped;      
+        if (next == rx_q_tail) ++rx_drop_queue_full;      
+        else                 ++rx_drop_scratch;   // блок был в scratch      
+    }      
+      
+    // Следующий буфер: свободный a → свободный b → scratch      
+    volatile uint32_t* next_buf;      
+    if (!rx_busy_a[0] || !rx_busy_a[1]) {      
+        rx_a_sel = rx_busy_a[0] ? 1u : 0u;      
+        next_buf = rx_a_sel ? rx_buf_a1 : rx_buf_a0;      
+    } else if (!rx_busy_b[0] || !rx_busy_b[1]) {      
+        rx_b_sel = rx_busy_b[0] ? 1u : 0u;      
+        next_buf = rx_b_sel ? rx_buf_b1 : rx_buf_b0;      
+        ++rx_drop_busy;                 // a-пул исчерпан — диагностика      
+    } else {      
+        next_buf = rx_scratch_a;        // всё занято — сливаем в scratch      
+        ++rx_drop_busy;      
+    }      
+    rx_dma_a_target = next_buf;      
+      
+    dma_channel_set_write_addr(a, next_buf, false);      
+    dma_channel_set_trans_count(a, RX_BLOCK_TRANSFERS, true);      
+}  
+  
+// ---------------------------------------------------------------------------    
+// Запуск захвата (после rx_dsp_start — NCO уже настроен)    
+// ---------------------------------------------------------------------------    
+  
+void __not_in_flash_func(rx_capture_start)(void) {    
+    // DMA_IRQ_0 живёт на Core 1 (там же DSP-поллинг очереди).    
+    assert(get_core_num() == 1);    
+    
+    if (rx_running) return;    
+    
+    rx_q_head = 0;    
+    rx_q_tail = 0;    
+    rx_dropped = 0;    
+    rx_cap_isr_count = 0;    
+    rx_drop_scratch = 0;    
+    rx_drop_queue_full = 0;    
+    rx_drop_busy = 0;    
+    rx_adc_fcs_over = 0;    
+    rx_busy_a[0] = rx_busy_a[1] = false;    
+    rx_busy_b[0] = rx_busy_b[1] = false;    
+    rx_a_sel = 0;    
+    rx_b_sel = 0;    
+    rx_dma_a_target = rx_buf_a0;    
+    
+    const uint32_t clk_sys_hz = clock_get_hz(clk_sys);    
+    const uint32_t clk_adc_hz = clock_get_hz(clk_adc);    
+    Serial.printf("[CAP] clk_adc=%lu clk_sys=%lu\n",    
+                  (unsigned long)clk_adc_hz, (unsigned long)clk_sys_hz);    
+    
+    adc_init();    
+    adc_gpio_init(RX_ADC_PIN_I);      
+    adc_gpio_init(RX_ADC_PIN_Q);  
+    adc_set_round_robin((1u << 0) | (1u << 1));    
+    adc_fifo_setup(true, true, 1, false, false);    
+    float adc_div = (float)clk_adc_hz / (float)RX_ADC_SAMPLE_RATE_HZ - 1.0f;      
+    if (adc_div < 0.0f) adc_div = 0.0f;  
+    adc_set_clkdiv(adc_div);    
+   
+    // ОДИН канал  
+    rx_dma_a = dma_claim_unused_channel(true);    
+    
+    dma_channel_config ca = dma_channel_get_default_config(rx_dma_a);      
+    channel_config_set_transfer_data_size(&ca, DMA_SIZE_16);  
+    channel_config_set_read_increment(&ca, false);    
+    channel_config_set_write_increment(&ca, true);    
+    channel_config_set_dreq(&ca, DREQ_ADC);    
+    // chain_to НЕ используется — перезапуск программный, в rx_dma_irq    
+    dma_channel_configure(rx_dma_a, &ca, rx_dma_a_target, &adc_hw->fifo,    
+                          RX_BLOCK_TRANSFERS, false);    
+    
+    dma_channel_set_irq0_enabled(rx_dma_a, true);    
+    irq_set_exclusive_handler(DMA_IRQ_0, rx_dma_irq);    
+    irq_set_enabled(DMA_IRQ_0, true);    
+    
+    dma_channel_start(rx_dma_a);    
+    adc_run(true);    
+    
+    rx_running = true;    
+    
+    Serial.printf("[CAP] chA=%d (single+irq) block=%u pairs transfers=%u\n",    
+                  rx_dma_a, (unsigned)RX_BLOCK_SAMPLES, (unsigned)RX_BLOCK_TRANSFERS);    
+    Serial.printf("[CAP] ADC target=%lu/s clkdiv=%ld\n",    
+                  (unsigned long)RX_ADC_SAMPLE_RATE_HZ, (long)(adc_div + 0.5f));    
+}  
+  
+// ---------------------------------------------------------------------------    
+// Останов DMA+ADC. Вызывается из core_sync_core1_poll при парковке — rx_dsp_stop не обязателен  
+// ---------------------------------------------------------------------------    
+void __not_in_flash_func(rx_capture_stop)(void) {  
+    rx_running = false;    
+    adc_run(false);    
+    irq_set_enabled(DMA_IRQ_0, false);    
+    
+    if (rx_dma_a >= 0) {    
+        dma_channel_set_irq0_enabled(rx_dma_a, false);    
+        dma_channel_abort(rx_dma_a);    
+        dma_channel_acknowledge_irq0(rx_dma_a);    
     }    
     
-    // Следующий буфер: свободный a → свободный b → scratch    
-    volatile uint32_t* next_buf;    
-    if (!rx_busy_a[0] || !rx_busy_a[1]) {    
-        rx_a_sel = rx_busy_a[0] ? 1u : 0u;    
-        next_buf = rx_a_sel ? rx_buf_a1 : rx_buf_a0;    
-    } else if (!rx_busy_b[0] || !rx_busy_b[1]) {    
-        rx_b_sel = rx_busy_b[0] ? 1u : 0u;    
-        next_buf = rx_b_sel ? rx_buf_b1 : rx_buf_b0;    
-        ++rx_drop_busy;                 // a-пул исчерпан — диагностика    
-    } else {    
-        next_buf = rx_scratch_a;        // всё занято — сливаем в scratch    
-        ++rx_drop_busy;    
-    }    
-    rx_dma_a_target = next_buf;    
+    adc_fifo_drain();    
+    rx_q_head = 0;    
+    rx_q_tail = 0;    
+    rx_busy_a[0] = rx_busy_a[1] = false;    
+    rx_busy_b[0] = rx_busy_b[1] = false;    
+    rx_a_sel = 0;    
+    rx_b_sel = 0;    
+    rx_dma_a_target = rx_buf_a0;    
     
-    dma_channel_set_write_addr(a, next_buf, false);    
-    dma_channel_set_trans_count(a, RX_BLOCK_TRANSFERS, true);    
-}
-
-// ---------------------------------------------------------------------------  
-// Запуск захвата (после rx_dsp_start — NCO уже настроен)  
-// ---------------------------------------------------------------------------  
-
-void __not_in_flash_func(rx_capture_start)(void) {  
-    // DMA_IRQ_0 живёт на Core 1 (там же DSP-поллинг очереди).  
-    assert(get_core_num() == 1);  
+    if (rx_dma_a >= 0) { dma_channel_unclaim(rx_dma_a); rx_dma_a = -1; }    
+}    
+    
+// ---------------------------------------------------------------------------    
+// API очереди — ТОЛЬКО Core 1 (из rx_dsp_poll)    
+// ---------------------------------------------------------------------------    
+const volatile uint32_t* rx_capture_get_block(void) {    
+    const uint8_t tail = rx_q_tail;    
+    if (tail == rx_q_head) return NULL;    
+    __dmb();    
+    return rx_queue[tail];    
+}    
+    
+void rx_capture_release(void) {    
+    const uint8_t tail = rx_q_tail;    
+    if (tail == rx_q_head) return;    
+    
+    const volatile uint32_t* buf = rx_queue[tail];    
+    __dmb();    
+    rx_q_tail = (uint8_t)((tail + 1u) % RX_QUEUE_DEPTH);    
+    __dmb();    
+    
+    if      (buf == rx_buf_a0) rx_busy_a[0] = false;    
+    else if (buf == rx_buf_a1) rx_busy_a[1] = false;    
+    else if (buf == rx_buf_b0) rx_busy_b[0] = false;    
+    else if (buf == rx_buf_b1) rx_busy_b[1] = false;    
+}    
+    
+uint32_t rx_capture_dropped(void) { return rx_dropped; }  
   
-    if (rx_running) return;  
-  
-    rx_q_head = 0;  
-    rx_q_tail = 0;  
-    rx_dropped = 0;  
-    rx_cap_isr_count = 0;  
-    rx_drop_scratch = 0;  
-    rx_drop_queue_full = 0;  
-    rx_drop_busy = 0;  
-    rx_busy_a[0] = rx_busy_a[1] = false;  
-    rx_busy_b[0] = rx_busy_b[1] = false;  
-    rx_a_sel = 0;  
-    rx_b_sel = 0;  
-    rx_dma_a_target = rx_buf_a0;  
-  
-    const uint32_t clk_sys_hz = clock_get_hz(clk_sys);  
-    const uint32_t clk_adc_hz = clock_get_hz(clk_adc);  
-    Serial.printf("[CAP] clk_adc=%lu clk_sys=%lu\n",  
-                  (unsigned long)clk_adc_hz, (unsigned long)clk_sys_hz);  
-  
-    adc_init();  
-    adc_gpio_init(RX_ADC_PIN_I);    
-    adc_gpio_init(RX_ADC_PIN_Q);
-    adc_set_round_robin((1u << 0) | (1u << 1));  
-    adc_fifo_setup(true, true, 1, false, false);  
-    float adc_div = (float)clk_adc_hz / (float)RX_ADC_SAMPLE_RATE_HZ - 1.0f;    
-    if (adc_div < 0.0f) adc_div = 0.0f;
-    adc_set_clkdiv(adc_div);  
- 
-    // ОДИН канал
-    rx_dma_a = dma_claim_unused_channel(true);  
-  
-    dma_channel_config ca = dma_channel_get_default_config(rx_dma_a);    
-    channel_config_set_transfer_data_size(&ca, DMA_SIZE_16);
-    channel_config_set_read_increment(&ca, false);  
-    channel_config_set_write_increment(&ca, true);  
-    channel_config_set_dreq(&ca, DREQ_ADC);  
-    // chain_to НЕ используется — перезапуск программный, в rx_dma_irq  
-    dma_channel_configure(rx_dma_a, &ca, rx_dma_a_target, &adc_hw->fifo,  
-                          RX_BLOCK_TRANSFERS, false);  
-  
-    dma_channel_set_irq0_enabled(rx_dma_a, true);  
-    irq_set_exclusive_handler(DMA_IRQ_0, rx_dma_irq);  
-    irq_set_enabled(DMA_IRQ_0, true);  
-  
-    dma_channel_start(rx_dma_a);  
-    adc_run(true);  
-  
-    rx_running = true;  
-  
-    Serial.printf("[CAP] chA=%d (single+irq) block=%u pairs transfers=%u\n",  
-                  rx_dma_a, (unsigned)RX_BLOCK_SAMPLES, (unsigned)RX_BLOCK_TRANSFERS);  
-    Serial.printf("[CAP] ADC target=%lu/s clkdiv=%ld\n",  
-                  (unsigned long)RX_ADC_SAMPLE_RATE_HZ, (long)(adc_div + 0.5f));  
-}
-
-// ---------------------------------------------------------------------------  
-// Останов DMA+ADC. Вызывается из core_sync_core1_poll при парковке — rx_dsp_stop не обязателен
-// ---------------------------------------------------------------------------  
-void __not_in_flash_func(rx_capture_stop)(void) {
-    rx_running = false;  
-    adc_run(false);  
-    irq_set_enabled(DMA_IRQ_0, false);  
-  
-    if (rx_dma_a >= 0) {  
-        dma_channel_set_irq0_enabled(rx_dma_a, false);  
-        dma_channel_abort(rx_dma_a);  
-        dma_channel_acknowledge_irq0(rx_dma_a);  
-    }  
-  
-    adc_fifo_drain();  
-    rx_q_head = 0;  
-    rx_q_tail = 0;  
-    rx_busy_a[0] = rx_busy_a[1] = false;  
-    rx_busy_b[0] = rx_busy_b[1] = false;  
-    rx_a_sel = 0;  
-    rx_b_sel = 0;  
-    rx_dma_a_target = rx_buf_a0;  
-  
-    if (rx_dma_a >= 0) { dma_channel_unclaim(rx_dma_a); rx_dma_a = -1; }  
-}  
-  
-// ---------------------------------------------------------------------------  
-// API очереди — ТОЛЬКО Core 1 (из rx_dsp_poll)  
-// ---------------------------------------------------------------------------  
-const volatile uint32_t* rx_capture_get_block(void) {  
-    const uint8_t tail = rx_q_tail;  
-    if (tail == rx_q_head) return NULL;  
-    __dmb();  
-    return rx_queue[tail];  
-}  
-  
-void rx_capture_release(void) {  
-    const uint8_t tail = rx_q_tail;  
-    if (tail == rx_q_head) return;  
-  
-    const volatile uint32_t* buf = rx_queue[tail];  
-    __dmb();  
-    rx_q_tail = (uint8_t)((tail + 1u) % RX_QUEUE_DEPTH);  
-    __dmb();  
-  
-    if      (buf == rx_buf_a0) rx_busy_a[0] = false;  
-    else if (buf == rx_buf_a1) rx_busy_a[1] = false;  
-    else if (buf == rx_buf_b0) rx_busy_b[0] = false;  
-    else if (buf == rx_buf_b1) rx_busy_b[1] = false;  
-}  
-  
-uint32_t rx_capture_dropped(void) { return rx_dropped; }
-
-bool rx_capture_is_running(void) {  
-    return rx_running;  
+bool rx_capture_is_running(void) {    
+    return rx_running;    
 }
