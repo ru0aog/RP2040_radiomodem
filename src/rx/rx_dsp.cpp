@@ -658,23 +658,31 @@ void rx_dsp_stop(void) {
     // Сброс очередей выполняет rx_capture_stop() + rx_dsp_start().  
 }  
   
-// Выкачка всех доступных блоков из rx_capture (Core 1, из loop1()).  
-void __not_in_flash_func(rx_dsp_poll)(void) {
+
+#define RX_DSP_MAX_BLOCKS_PER_POLL 2   // квант: не более 2 блоков за проход (~4 мс)  
+#define RSID_SERVICE_PERIOD_US   2000  // RSID-сервис не реже, чем раз в 2 мс  
+
+// Выкачка всех доступных блоков из rx_capture (Core 1, из loop1())
+void __not_in_flash_func(rx_dsp_poll)(void) {  
     const volatile uint32_t* blk;  
-    bool got = false;  
-    while ((blk = rx_capture_get_block()) != NULL) {  
-        got = true;  
+    for (int n = 0; n < RX_DSP_MAX_BLOCKS_PER_POLL; ++n) {  
+        blk = rx_capture_get_block();  
+        if (!blk) break;  
         const uint32_t t0 = time_us_32();  
         rx_dsp_process_block(blk);  
         core1_dsp_busy_us += (uint32_t)(time_us_32() - t0);  
     }  
-    if (!got && rsid_rx_service_sliced) {  
+    // RSID по таймеру, а не по пустой очереди — иначе под нагрузкой голодает  
+    static uint32_t rsid_next = 0;  
+    const uint32_t now = time_us_32();  
+    if (rsid_rx_service_sliced && (int32_t)(now - rsid_next) >= 0) {  
+        rsid_next = now + RSID_SERVICE_PERIOD_US;  
         const uint32_t t0 = time_us_32();  
         rsid_rx_service_sliced();  
         core1_rsid_busy_us += (uint32_t)(time_us_32() - t0);  
     }  
-    core1_update_load(time_us_32());  
-}  
+    core1_update_load(now);  
+}
   
 // AFC: подстройка NCO на лету (Гц относительно LO).  
 void rx_dsp_set_nco_hz(int32_t f_hz) {  
